@@ -168,6 +168,10 @@ uses
   {$Include FastMM4Options.inc}
 {$endif}
 
+{$DEFINE MemoryLoadLibrarySupport}
+{.$DEFINE IncludeResource}
+{.$DEFINE IncludeResource_madExcept}
+
 {Translate legacy v4 defines to their current names.}
 {$ifdef FullDebugMode} {$define FastMM_FullDebugMode} {$endif}
 {$ifdef LoadDebugDLLDynamically} {$define FastMM_DebugLibraryDynamicLoading} {$endif}
@@ -188,7 +192,7 @@ uses
 dynamic loading is explicitly specified.}
 {$ifdef FastMM_FullDebugMode}
   {$ifndef FastMM_DebugLibraryDynamicLoading}
-    {$define FastMM_DebugLibraryStaticDependency}
+  {$define FastMM_DebugLibraryStaticDependency}
   {$endif}
 {$endif}
 
@@ -200,7 +204,7 @@ dynamic loading is explicitly specified.}
   {$define 64Bit}
 {$else}
   {$define 32Bit}
-{$endif}
+{$ifend}
 
 {$ifdef CPUX86}
   {$ifndef PurePascal}
@@ -289,7 +293,7 @@ const
   CFastMM_SmallBlockArenaCount = 4;
   CFastMM_MediumBlockArenaCount = 4;
   CFastMM_LargeBlockArenaCount = 8;
-{$endif}
+{$ifend}
 
   {The default name of debug support library.}
   CFastMM_DefaultDebugSupportLibraryName = {$ifndef 64Bit}'FastMM_FullDebugMode.dll'{$else}'FastMM_FullDebugMode64.dll'{$endif};
@@ -960,6 +964,25 @@ function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxD
 {$endif}
 
 implementation
+
+{$IFDEF MemoryLoadLibrarySupport}
+uses
+  FastMMMemoryModule;
+
+{$IF Defined( IncludeResource_madExcept )}
+  {$IFDEF Win64}
+    {$R FastMM_FullDebugMode_madExcept64.res}
+  {$ELSE}
+    {$R FastMM_FullDebugMode_madExcept.res}
+  {$ENDIF}
+{$ELSEIF Defined( IncludeResource )}
+  {$IFDEF Win64}
+    {$R FastMM_FullDebugMode64.res}
+  {$ELSE}
+    {$R FastMM_FullDebugMode.res}
+  {$ENDIF}
+{$IFEND Defined( IncludeResource_madExcept )}
+{$ENDIF}
 
 {All blocks are preceded by a block header.  The block header varies in size according to the block type.  The block
 type and state may be determined from the bits of the word preceding the block address, as follows:
@@ -1766,6 +1789,9 @@ var
   {The handle to the debug mode support DLL.}
 {$ifndef FastMM_DebugLibraryStaticDependency}
   DebugSupportLibraryHandle: NativeUInt;
+  {$IFDEF MemoryLoadLibrarySupport}
+  DebugSupportLibraryRHandle: PMemoryModule;
+  {$ENDIF}
 {$endif}
   DebugSupportConfigured: Boolean;
 
@@ -2427,6 +2453,224 @@ begin
 {$endif}
 end;
 
+{------------------------------------------}
+{--------Atomic calls for Delphi XE2-------}
+{------------------------------------------}
+
+{$IF RTLVersion < 24.00}
+
+function AtomicIncrement(var Target: Cardinal): Cardinal; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, 1
+  LOCK XADD [RCX], EAX
+  INC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, 1
+  LOCK XADD [ECX], EAX
+  INC     EAX
+{$ENDIF}
+end;
+
+function AtomicIncrement(var Target: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, 1
+  LOCK XADD [RCX], EAX
+  INC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, 1
+  LOCK XADD [ECX], EAX
+  INC     EAX
+{$ENDIF}
+end;
+
+function AtomicIncrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  MOV     RAX, RDX
+  LOCK XADD [RCX], RAX
+  ADD     RAX, RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  LOCK XADD [ECX], EAX
+  ADD     EAX, EDX
+{$ENDIF}
+end;
+
+function AtomicDecrement(var Target: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, -1
+  LOCK XADD [RCX], EAX
+  DEC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, -1
+  LOCK XADD [ECX], EAX
+  DEC     EAX
+{$ENDIF}
+end;
+
+function AtomicDecrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  NEG     RDX
+  MOV     RAX, RDX
+  LOCK XADD [RCX], RAX
+  ADD     RAX, RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  NEG     EDX
+  MOV     EAX, EDX
+  LOCK XADD [ECX], EAX
+  ADD     EAX, EDX
+{$ENDIF}
+end;
+
+function AtomicExchange(var Target: Integer; Value: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     EAX, EDX
+  //     RCX Target
+  //     EAX Value
+  LOCK XCHG [RCX], EAX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  //     ECX Target
+  //     EAX Value
+  LOCK XCHG [ECX], EAX
+{$ENDIF}
+end;
+
+function AtomicExchange(var Target: Pointer; Value: Pointer): Pointer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  MOV     RAX, RDX
+  LOCK XCHG [RCX], RAX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  //     ECX Target
+  //     EAX Value
+  LOCK XCHG [ECX], EAX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Integer; Value: Integer; Compare: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     EDX Value
+  //     R8  Compare
+  // <-- EAX Result
+  MOV     RAX, R8
+  //     RCX Target
+  //     EDX Value
+  //     RAX Compare
+  LOCK CMPXCHG [RCX], EDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  //     ECX Compare
+  // <-- EAX Result
+  XCHG    EAX, ECX
+  //     EAX Compare
+  //     EDX Value
+  //     ECX Target
+  LOCK CMPXCHG [ECX], EDX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Int64; Value: Int64; Compare: Int64): Int64; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  //     R8  Compare
+  // <-- RAX Result
+  MOV     RAX, R8
+  LOCK CMPXCHG [RCX], RDX
+{$ELSE}
+  PUSH EBX
+  PUSH EDI
+  MOV EDI, EAX  // Target
+  MOV EAX, DWORD PTR [Compare]
+  MOV EDX, DWORD PTR [Compare+4]
+  MOV EBX, DWORD PTR [Value]
+  MOV ECX, DWORD PTR [Value+4]
+  LOCK CMPXCHG8B QWORD PTR [EDI]
+  POP EDI
+  POP EBX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Pointer; Value: Pointer; Compare: Pointer): Pointer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  //     R8  Compare
+  // <-- RAX Result
+  MOV     RAX, R8
+  //     RCX Target
+  //     RDX Value
+  //     RAX Compare
+  LOCK CMPXCHG [RCX], RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  //     ECX Compare
+  // <-- EAX Result
+  XCHG    EAX, ECX
+  //     EAX Comp
+  //     EDX Value
+  //     ECX Target
+  LOCK CMPXCHG [ECX], EDX
+{$ENDIF}
+end;
+
+{$IFEND}
 
 {------------------------------------------}
 {---------Operating system calls-----------}
@@ -4044,7 +4288,7 @@ asm
 {$endif}
   bsf eax, eax
 end;
-{$endif}
+{$ifend}
 
 {Returns True if the block is not in use.}
 function BlockIsFree(APSmallMediumOrLargeBlock: Pointer): Boolean; inline;
@@ -4575,7 +4819,7 @@ begin
     LRemainingSize := NativeUInt(APLargeBlockHeader.ActualBlockSize);
 {$if CompilerVersion < 31}
     Result := 0; //Workaround for spurious warning with older compilers
-{$endif}
+{$ifend}
     while True do
     begin
       OS_GetVirtualMemoryRegionInfo(LPCurrentSegment, LMemoryRegionInfo);
@@ -9831,7 +10075,7 @@ begin
   begin
     {$if CompilerVersion < 31}
     LChildDirection := False; //Workaround for spurious warning with older compilers
-    {$endif}
+    {$ifend}
     while True do
     begin
       LPSummaryEntry := @APLeakSummary.MemoryLeakEntries[i];
@@ -10268,20 +10512,20 @@ var
 begin
   {---------Bug checks-------}
 
-  {$if CSmallBlockHeaderSize <> 2} {$message error 'Small block header size must be 2 bytes'} {$endif}
-  {$if CMediumBlockHeaderSize <> 8} {$message error 'Medium block header size must be 8 bytes'} {$endif}
-  {$if CLargeBlockHeaderSize and 63 <> 0} {$message error 'Large block header size must be multiple of 64 bytes'} {$endif}
+  {$if CSmallBlockHeaderSize <> 2} {$message error 'Small block header size must be 2 bytes'} {$ifend}
+  {$if CMediumBlockHeaderSize <> 8} {$message error 'Medium block header size must be 8 bytes'} {$ifend}
+  {$if CLargeBlockHeaderSize and 63 <> 0} {$message error 'Large block header size must be multiple of 64 bytes'} {$ifend}
   {In order to ensure minimum alignment is always honoured the debug block header must be a multiple of 64.}
-  {$if CDebugBlockHeaderSize and 63 <> 0} {$message error 'Debug block header must be a multiple of 64 bytes'} {$endif}
+  {$if CDebugBlockHeaderSize and 63 <> 0} {$message error 'Debug block header must be a multiple of 64 bytes'} {$ifend}
 
   {Span headers have to be a multiple of 64 bytes in order to ensure that 64-byte alignment of user data is possible.}
-  {$if CSmallBlockSpanHeaderSize and 63 <> 0} {$message error 'Small block span header size must be multiple of 64 bytes'} {$endif}
-  {$if CMediumBlockSpanHeaderSize and 63 <> 0} {$message error 'Medium block span header size must be multiple of 64 bytes'} {$endif}
+  {$if CSmallBlockSpanHeaderSize and 63 <> 0} {$message error 'Small block span header size must be multiple of 64 bytes'} {$ifend}
+  {$if CMediumBlockSpanHeaderSize and 63 <> 0} {$message error 'Medium block span header size must be multiple of 64 bytes'} {$ifend}
 
-  {$if CSmallBlockManagerSize and 63 <> 0} {$message error 'Small block manager size must be a multiple of 64 bytes'} {$endif}
-  {$if CSmallBlockManagerSize <> (1 shl CSmallBlockManagerSizeBits)} {$message error 'Small block manager size mismatch'} {$endif}
+  {$if CSmallBlockManagerSize and 63 <> 0} {$message error 'Small block manager size must be a multiple of 64 bytes'} {$ifend}
+  {$if CSmallBlockManagerSize <> (1 shl CSmallBlockManagerSizeBits)} {$message error 'Small block manager size mismatch'} {$ifend}
 
-  {$if CLargeBlockManagerSize and 63 <> 0} {$message error 'Large block manager size must be a multiple of 64 bytes'} {$endif}
+  {$if CLargeBlockManagerSize and 63 <> 0} {$message error 'Large block manager size must be a multiple of 64 bytes'} {$ifend}
 
   {---------General configuration-------}
 
@@ -10593,7 +10837,7 @@ function FastMM_LoadDebugSupportLibrary: Boolean;
 begin
 {$ifndef FastMM_DebugLibraryStaticDependency}
   {Already loaded?  If so, return success.}
-  if DebugSupportLibraryHandle <> 0 then
+  if ( DebugSupportLibraryHandle <> 0 ) {$IFDEF MemoryLoadLibrarySupport}OR Assigned( DebugSupportLibraryRHandle ){$ENDIF} then
     Exit(True);
 
   DebugSupportLibraryHandle := LoadLibrary(FastMM_DebugSupportLibraryName);
@@ -10602,7 +10846,25 @@ begin
     DebugLibrary_GetRawStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
     DebugLibrary_GetFrameBasedStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetFrameBasedStackTrace'));
     DebugLibrary_LogStackTrace_Legacy := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTrace'));
+  end
+  else
+  {$IFDEF MemoryLoadLibrarySupport}
+    begin
+    MemoryLoadLibrary( Copy( CFastMM_DefaultDebugSupportLibraryName, 1, Length( CFastMM_DefaultDebugSupportLibraryName )-3 ), DebugSupportLibraryRHandle );
+    if Assigned( DebugSupportLibraryRHandle ) then
+      begin
+      DebugLibrary_GetRawStackTrace := MemoryGetProcAddress(DebugSupportLibraryRHandle, 'GetRawStackTrace');
+      DebugLibrary_GetFrameBasedStackTrace := MemoryGetProcAddress(DebugSupportLibraryRHandle, 'GetFrameBasedStackTrace');
+      DebugLibrary_LogStackTrace_Legacy := MemoryGetProcAddress(DebugSupportLibraryRHandle, 'LogStackTrace');
+      end;
+    end;
+  Result := ( DebugSupportLibraryHandle <> 0 ) {$IFDEF MemoryLoadLibrarySupport}OR Assigned( DebugSupportLibraryRHandle ){$ENDIF};
+  {$ELSE}
+    result := False;
+  {$ENDIF}
 
+  if result then
+    begin
     {Try to use the stack trace routines from the debug support library, if available.}
     if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace)
       and Assigned(DebugLibrary_GetRawStackTrace) then
@@ -10615,11 +10877,7 @@ begin
     begin
       FastMM_ConvertStackTraceToText := FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
     end;
-
-    Result := True;
-  end
-  else
-    Result := False;
+    end;
 {$else}
   {Use the stack trace routines from the debug support library.}
   if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace) then
@@ -10635,7 +10893,7 @@ end;
 function FastMM_FreeDebugSupportLibrary: Boolean;
 begin
 {$ifndef FastMM_DebugLibraryStaticDependency}
-  if DebugSupportLibraryHandle = 0 then
+  if ( DebugSupportLibraryHandle = 0 ) {$IFDEF MemoryLoadLibrarySupport}AND NOT Assigned( DebugSupportLibraryRHandle ){$ENDIF} then
     Exit(False);
 {$endif}
 
@@ -10651,8 +10909,18 @@ begin
   end;
 
 {$ifndef FastMM_DebugLibraryStaticDependency}
-  FreeLibrary(DebugSupportLibraryHandle);
-  DebugSupportLibraryHandle := 0;
+  if ( DebugSupportLibraryHandle <> 0 ) then
+    begin
+    FreeLibrary(DebugSupportLibraryHandle);
+    DebugSupportLibraryHandle := 0;
+    end
+  {$IFDEF MemoryLoadLibrarySupport}
+  else if Assigned( DebugSupportLibraryRHandle ) then
+    begin
+    MemoryFreeLibrary( DebugSupportLibraryRHandle );
+    DebugSupportLibraryRHandle := nil;
+    end;
+  {$ENDIF};
 
   DebugLibrary_GetRawStackTrace := nil;
   DebugLibrary_GetFrameBasedStackTrace := nil;
