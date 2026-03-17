@@ -1,5 +1,4 @@
 {
-
 Fast Memory Manager: FullDebugMode Support DLL 1.70
 
 Description:
@@ -77,7 +76,7 @@ uses
   {$ifdef madExcept}madStackTrace,{$endif}
   {$ifdef EurekaLog_Legacy}ExceptionLog,{$endif}
   {$ifdef EurekaLog_V7}EFastMM4Support,{$endif}
-  System.SysUtils, {$IFDEF MACOS}Posix.Base, SBMapFiles {$ELSE} Winapi.Windows {$ENDIF};
+  SysUtils, {$IFDEF MACOS}Posix.Base, SBMapFiles{$ELSE}Windows{$ENDIF};
 
 {$R *.res}
 
@@ -90,8 +89,15 @@ uses
 {$LIBSUFFIX '64'}
 {$ifend}
 
-{--------------------------Return Address Info Cache --------------------------}
+{$IF CompilerVersion <= 20}
+type
+  NativeUInt = Cardinal;
+  PNativeUInt = ^NativeUInt;
+  NativeInt = Integer;
+{$IFEND}
 
+{--------------------------Return Address Info Cache --------------------------}
+{$IFDEF JCLDebug}
 const
   CReturnAddressCacheSize = 4096;
   {FastMM assumes a maximum of 256 characters per stack trace entry.  The address text and line break are in addition to
@@ -111,7 +117,7 @@ type
     InfoText: array[0..CMaxInfoTextLength - 1] of AnsiChar;
   end;
 
-  TReturnAddressInfoCache = record
+  TReturnAddressInfoCache = {$IFDEF UNICODE}record{$ELSE}object{$ENDIF}
     {Entry 0 is the root of the tree.}
     Entries: array[0..CReturnAddressCacheSize] of TReturnAddressInfo;
     NextNewEntryIndex: Integer;
@@ -253,6 +259,7 @@ begin
     LAddressBits := LAddressBits shr 1;
   end;
 end;
+{$ENDIF JCLDebug}
 
 {--------------------------Stack Tracing Subroutines--------------------------}
 
@@ -429,7 +436,69 @@ end;
 {$IFDEF MSWINDOWS}
 {Returns true if the return address is a valid call site.  This function is only safe to call while exceptions are
 being handled.}
+{$IF NOT Declared( GetMXCSR )}
+var
+  TestSSE : Cardinal;
+  DefaultMXCSR : Cardinal = $1900;
+
+function GetMXCSR: Cardinal;
+{$IF Defined( Win32 )}
+asm
+{$IFDEF PIC}
+        XOR     EAX, EAX
+        PUSH    EAX
+        CALL    GetGOT
+        MOV     EAX, [EAX].OFFSET TestSSE
+        CMP     [EAX], 0
+        POP     EAX
+        JE      @@NOSSE
+{$ELSE !PIC}
+        XOR     EAX, EAX
+        CMP     TestSSE, EAX
+        JE      @@NOSSE
+{$ENDIF !PIC}
+        PUSH    EAX
+        STMXCSR [ESP].DWord
+        POP     EAX
+@@NOSSE:
+end;
+{$ELSEIF defined( Win64 )}
+asm
+        PUSH    0
+        STMXCSR [RSP].DWord
+        POP     RAX
+end;
+{$ELSE}
+{$MESSAGE ERROR 'Unknown platform'}
+{$IFEND}
+{$IFEND}
+
 function IsValidCallSite(AReturnAddress: NativeUInt): Boolean;
+  {$IF NOT Declared( SetMXCSR )}
+  procedure SetMXCSR(NewMXCSR: Cardinal);
+  {$IF defined(Win32)}
+  begin
+    if TestSSE = 0 then exit;
+    DefaultMXCSR := NewMXCSR and $FFC0;  // Remove status flag bits
+    asm
+  {$IFDEF PIC}
+          MOV     EAX,[EBX].OFFSET DefaultMXCSR
+          LDMXCSR [EAX]
+  {$ELSE !PIC}
+          LDMXCSR DefaultMXCSR
+  {$ENDIF !PIC}
+    end;
+  end;
+  {$ELSEIF defined(Win64)}
+  asm
+          AND     ECX, $FFC0 // Remove flag bits
+          MOV     DefaultMXCSR, ECX
+          LDMXCSR DefaultMXCSR
+  end;
+  {$ELSE}
+  {$MESSAGE ERROR 'Unknown platform'}
+  {$IFEND}
+  {$IFEND}
 var
   LCallAddress: NativeUInt;
   LCode8Back, LCode4Back, LTemp: Cardinal;
@@ -437,7 +506,7 @@ var
   LOldMXCSR: Cardinal;
 begin
   {We assume (for now) that all application code will execute within the first 4GB of address space.}
-  if (AReturnAddress > $ffff) {$if SizeOf(Pointer) = 8}and (AReturnAddress <= $ffffffff){$endif} then
+  if (AReturnAddress > $ffff) {$if SizeOf(Pointer) = 8}and (AReturnAddress <= $ffffffff){$IFEND} then
   begin
     {The call address is up to 8 bytes before the return address}
     LCallAddress := AReturnAddress - 8;
@@ -610,7 +679,7 @@ begin
         {The pointer to the next stack frame appears valid:  Get the return address of the current frame}
         LReturnAddress := PNativeUInt(LCurrentFrame + SizeOf(Pointer))^;
         {Does this appear to be a valid return address}
-        if (LReturnAddress > $ffff) {$if SizeOf(Pointer) = 8}and (LReturnAddress <= $ffffffff){$endif} then
+        if (LReturnAddress > $ffff) {$if SizeOf(Pointer) = 8}and (LReturnAddress <= $ffffffff){$IFEND} then
         begin
           {Is the map for this return address incorrect? It may be unknown or marked as non-executable because a library
           was previously not yet loaded, or perhaps this is not a valid stack frame.}
@@ -774,6 +843,227 @@ end;
 
 {$ENDIF}
 
+{------------------------------------------}
+{--------Atomic calls for Delphi XE2-------}
+{------------------------------------------}
+
+{$IF RTLVersion < 24.00}
+
+(*
+function AtomicIncrement(var Target: Cardinal): Cardinal; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, 1
+  LOCK XADD [RCX], EAX
+  INC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, 1
+  LOCK XADD [ECX], EAX
+  INC     EAX
+{$ENDIF}
+end;
+
+function AtomicIncrement(var Target: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, 1
+  LOCK XADD [RCX], EAX
+  INC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, 1
+  LOCK XADD [ECX], EAX
+  INC     EAX
+{$ENDIF}
+end;
+
+function AtomicIncrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  MOV     RAX, RDX
+  LOCK XADD [RCX], RAX
+  ADD     RAX, RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  LOCK XADD [ECX], EAX
+  ADD     EAX, EDX
+{$ENDIF}
+end;
+
+function AtomicDecrement(var Target: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, -1
+  LOCK XADD [RCX], EAX
+  DEC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, -1
+  LOCK XADD [ECX], EAX
+  DEC     EAX
+{$ENDIF}
+end;
+
+function AtomicDecrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  NEG     RDX
+  MOV     RAX, RDX
+  LOCK XADD [RCX], RAX
+  ADD     RAX, RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  NEG     EDX
+  MOV     EAX, EDX
+  LOCK XADD [ECX], EAX
+  ADD     EAX, EDX
+{$ENDIF}
+end;
+
+function AtomicExchange(var Target: Integer; Value: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     EAX, EDX
+  //     RCX Target
+  //     EAX Value
+  LOCK XCHG [RCX], EAX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  //     ECX Target
+  //     EAX Value
+  LOCK XCHG [ECX], EAX
+{$ENDIF}
+end;
+
+function AtomicExchange(var Target: Pointer; Value: Pointer): Pointer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  MOV     RAX, RDX
+  LOCK XCHG [RCX], RAX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  //     ECX Target
+  //     EAX Value
+  LOCK XCHG [ECX], EAX
+{$ENDIF}
+end;
+*)
+
+function AtomicCmpExchange(var Target: Integer; Value: Integer; Compare: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     EDX Value
+  //     R8  Compare
+  // <-- EAX Result
+  MOV     RAX, R8
+  //     RCX Target
+  //     EDX Value
+  //     RAX Compare
+  LOCK CMPXCHG [RCX], EDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  //     ECX Compare
+  // <-- EAX Result
+  XCHG    EAX, ECX
+  //     EAX Compare
+  //     EDX Value
+  //     ECX Target
+  LOCK CMPXCHG [ECX], EDX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Int64; Value: Int64; Compare: Int64): Int64; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  //     R8  Compare
+  // <-- RAX Result
+  MOV     RAX, R8
+  LOCK CMPXCHG [RCX], RDX
+{$ELSE}
+  PUSH EBX
+  PUSH EDI
+  MOV EDI, EAX  // Target
+  MOV EAX, DWORD PTR [Compare]
+  MOV EDX, DWORD PTR [Compare+4]
+  MOV EBX, DWORD PTR [Value]
+  MOV ECX, DWORD PTR [Value+4]
+  LOCK CMPXCHG8B QWORD PTR [EDI]
+  POP EDI
+  POP EBX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Pointer; Value: Pointer; Compare: Pointer): Pointer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  //     R8  Compare
+  // <-- RAX Result
+  MOV     RAX, R8
+  //     RCX Target
+  //     RDX Value
+  //     RAX Compare
+  LOCK CMPXCHG [RCX], RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  //     ECX Compare
+  // <-- EAX Result
+  XCHG    EAX, ECX
+  //     EAX Comp
+  //     EDX Value
+  //     ECX Target
+  LOCK CMPXCHG [ECX], EDX
+{$ENDIF}
+end;
+
+{$IFEND}
+
 {-----------------------------Stack Trace Logging----------------------------}
 
 {Gets the textual representation of the stack trace into ABuffer and returns a pointer to the position just after the
@@ -835,7 +1125,7 @@ begin
 
   {This routine is protected by a lock - only one thread can be inside it at any given time.}
   while AtomicCmpExchange(LLogStackTrace_Locked, 1, 0) <> 0 do
-    Winapi.Windows.SwitchToThread;
+    {Winapi.Windows.}SwitchToThread;
 
   try
     for LInd := 0 to AMaxDepth - 1 do
@@ -851,13 +1141,14 @@ begin
 
       {If the info for the return address is not yet in the cache, add it.}
       LPInfo := LReturnAddressInfoCache.FindEntry(LAddress);
+
       if LPInfo = nil then
       begin
         if not LLocationCacheInitialized then
         begin
           {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
           BeginGetLocationInfoCache;
-          {$endif}
+          {$IFEND}
           LLocationCacheInitialized := True;
         end;
         {Get location info for the caller (at least one byte before the return address).}
@@ -870,7 +1161,7 @@ begin
         {Remove UnitName from ProcedureName, no need to output it twice}
         P := PChar(LInfo.ProcedureName);
         if (StrLComp(P, PChar(LInfo.UnitName), Length(LInfo.UnitName)) = 0) and (P[Length(LInfo.UnitName)] = '.') then
-          AppendInfoToString(LTempStr, Copy(LInfo.ProcedureName, Length(LInfo.UnitName) + 2))
+          AppendInfoToString(LTempStr, Copy(LInfo.ProcedureName, Length(LInfo.UnitName) + 2{$IF CompilerVersion < 23},Length( LInfo.ProcedureName )-Length( LInfo.UnitName )-1{$IFEND}))
         else
           AppendInfoToString(LTempStr, LInfo.ProcedureName);
 
@@ -878,7 +1169,7 @@ begin
           AppendInfoToString(LTempStr, IntToStr(LInfo.LineNumber));
 
         LPInfo := LReturnAddressInfoCache.AddEntry(LAddress, AnsiString(LTempStr));
-      end;
+        end;
 
       System.Move(LPInfo.InfoText, Result^, LPInfo.InfoTextLength);
       Inc(Result, LPInfo.InfoTextLength);
@@ -890,7 +1181,7 @@ begin
     begin
       {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
       EndGetLocationInfoCache;
-      {$endif}
+      {$IFEND}
     end;
 
     LLogStackTrace_Locked := 0;
@@ -1007,6 +1298,133 @@ begin
 end;
 {$ENDIF}
 
+{$IFDEF Win32}
+function GetBriefSSEType: Cardinal;
+type
+  { Do not change registers order ! }
+  TCPUIDStruct = packed record
+    rEAX: Cardinal; { EAX Register }
+    rEBX: Cardinal; { EBX Register }
+    rEDX: Cardinal; { EDX Register }
+    rECX: Cardinal; { ECX Register }
+  end;
+  PCPUIDStruct = ^TCPUIDStruct;
+  
+  function IsCPUIDSupported: Boolean;
+  asm
+    {$IFDEF CPUX64}
+    PUSH RCX
+    MOV RCX,RCX
+    PUSHFQ
+    POP RAX
+    MOV RCX, RAX
+    XOR RAX, $200000
+    PUSH RAX
+    POPFQ
+    PUSHFQ
+    POP RAX
+    XOR RAX, RCX
+    SHR RAX, 21
+    AND RAX, 1
+    PUSH RCX
+    POPFQ
+    POP RCX
+    {$ELSE !CPUX64}
+
+    PUSH ECX
+    PUSHFD
+    POP EAX { EAX = EFLAGS }
+    MOV ECX, EAX  { Save the original EFLAGS value . }
+    {
+    CPUID is supported only if we can modify
+    bit 21 of EFLAGS register !
+     }
+    XOR EAX, $200000
+    PUSH EAX
+    POPFD { Set the new EFLAGS value }
+    PUSHFD
+    POP EAX { Read EFLAGS }
+    {
+    Check if the 21 bit was modified !
+    If so ==> Return True .
+    else  ==> Return False.
+     }
+    XOR EAX, ECX
+    SHR EAX, 21
+    AND EAX, 1
+    PUSH ECX
+    POPFD  { Restore original EFLAGS value . }
+    POP ECX
+    {$ENDIF CPUX64}
+  end;
+  procedure CallCPUID(const ID: NativeInt; var CPUIDStruct);
+  asm
+    {
+    ALL REGISTERS (rDX,rCX,rBX) MUST BE SAVED BEFORE
+    EXECUTING CPUID INSTRUCTION !
+     }
+    {$IFDEF CPUX64}
+    PUSH R9
+    PUSH RBX
+    PUSH RDX
+    MOV RAX,RCX
+    MOV R9,RDX
+    CPUID
+    {$IFNDEF FPC}
+    MOV R9.TCPUIDStruct.rEAX,EAX
+    MOV R9.TCPUIDStruct.rEBX,EBX
+    MOV R9.TCPUIDStruct.rECX,ECX
+    MOV R9.TCPUIDStruct.rEDX,EDX
+    {$ELSE FPC}
+    MOV [R9].TCPUIDStruct.rEAX,EAX
+    MOV [R9].TCPUIDStruct.rEBX,EBX
+    MOV [R9].TCPUIDStruct.rECX,ECX
+    MOV [R9].TCPUIDStruct.rEDX,EDX
+    {$ENDIF !FPC}
+    POP RDX
+    POP RBX
+    POP R9
+    {$ELSE !CPUX64}
+
+    PUSH EDI
+    PUSH ECX
+    PUSH EBX
+    MOV EDI,EDX
+    CPUID
+    {$IFNDEF FPC}
+    MOV EDI.TCPUIDStruct.rEAX,EAX
+    MOV EDI.TCPUIDStruct.rEBX,EBX
+    MOV EDI.TCPUIDStruct.rECX,ECX
+    MOV EDI.TCPUIDStruct.rEDX,EDX
+    {$ELSE FPC}
+    MOV [EDI].TCPUIDStruct.rEAX,EAX
+    MOV [EDI].TCPUIDStruct.rEBX,EBX
+    MOV [EDI].TCPUIDStruct.rECX,ECX
+    MOV [EDI].TCPUIDStruct.rEDX,EDX
+    {$ENDIF !FPC}
+    POP EBX
+    POP ECX
+    POP EDI
+    {$ENDIF CPUX64}
+  end;
+var
+  Info: PCPUIDStruct;
+begin
+  Result := $00000000; // No SSE
+  if not IsCPUIDSupported then
+    Exit;
+  Info := GetMemory(SizeOf(TCPUIDStruct));
+  CallCPUID(1, Info^);
+
+  if (Info^.rEDX and $02000000) <> 0 then // EDX 25 bits - SSE bit
+    Result := Result or $00000001; // SSE supported
+  if (Info^.rEDX and $04000000) <> 0 then // EDX 26 bits - SSE2 bit
+    Result := Result or $00000002; // SSE2 supported
+
+  FreeMemory(Info);
+end;
+{$ENDIF Win32}
+
 {-----------------------------Exported Functions----------------------------}
 
 exports
@@ -1019,6 +1437,15 @@ exports
 
 begin
 {$ifdef JCLDebug}
+{$IF CompilerVersion < 23}
+{$IF defined( Win32 )} // Win32 or OSX32
+  TestSSE := GetBriefSSEType;
+  DefaultMXCSR := GetMXCSR and $FFC0;  // Remove flag bits;
+{$ELSEIF defined( Win64 )} // Win64
+  TestSSE := $3; // SSE & SSE2 are available on X64
+{$IFEND}
+{$IFEND}
+
   JclStackTrackingOptions := JclStackTrackingOptions + [stAllModules];
 {$endif}
 
