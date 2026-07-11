@@ -144,10 +144,29 @@ Supported Platforms:
 
 unit FastMM5;
 
+{Compatibility defines for compilers older than Delphi XE3.  The XE3+ code paths are not affected by these.}
+{$if CompilerVersion < 23} {Delphi 2009/2010/XE: no unit scope names, and the CPUX86 conditional is not predefined.}
+  {$define FastMM_NoUnitScopeNames}
+  {$ifndef CPUX86}{$define CPUX86}{$endif}
+{$ifend}
+
 interface
 
 uses
-  Winapi.Windows;
+  {$ifdef FastMM_NoUnitScopeNames}Windows{$else}Winapi.Windows{$endif};
+
+{$if CompilerVersion < 21} {Delphi 2009 compatibility:  The intrinsic NativeInt/NativeUInt types are redeclared as
+  Integer/Cardinal, because the Delphi 2009 intrinsic types have inconsistent signedness handling that triggers
+  internal compiler error C12079 during code generation of unsigned comparisons.  On Win32 they are binary identical.
+  PNativeInt, PNativeUInt and PInt64Array are not declared in the Delphi 2009 System unit.}
+type
+  NativeInt = Integer;
+  NativeUInt = Cardinal;
+  PNativeInt = ^NativeInt;
+  PNativeUInt = ^NativeUInt;
+  TInt64Array = array[0..MaxInt div SizeOf(Int64) - 1] of Int64;
+  PInt64Array = ^TInt64Array;
+{$ifend}
 
 {$RangeChecks Off}
 {$BoolEval Off}
@@ -968,6 +987,51 @@ implementation
 {$IFDEF MemoryLoadLibrarySupport}
 uses
   FastMMMemoryModule;
+{$ENDIF}
+
+{$if CompilerVersion < 23}
+{------------------------------------------}
+{--Compatibility support for older Delphi--}
+{------------------------------------------}
+
+{SetFilePointerEx is not declared in the Windows unit of older Delphi versions.}
+function SetFilePointerEx(hFile: THandle; liDistanceToMove: Int64; lpNewFilePointer: PInt64;
+  dwMoveMethod: DWORD): BOOL; stdcall; external kernel32 name 'SetFilePointerEx';
+
+{$ifdef X86ASM}
+{The System.TestSSE variable is not available in older Delphi versions, so the CPU feature detection is done here.
+Only bit 1 (= SSE2 support) is currently used.}
+function Compat_TestSSE: Integer;
+asm
+  push ebx
+  mov eax, 1
+  cpuid
+  xor eax, eax
+  test edx, $2000000 {Bit 25 = SSE}
+  jz @CheckSSE2
+  or eax, 1
+@CheckSSE2:
+  test edx, $4000000 {Bit 26 = SSE2}
+  jz @Done
+  or eax, 2
+@Done:
+  pop ebx
+end;
+{$endif}
+
+{Older Delphi versions declare TMemoryManagerEx.AllocMem with a Cardinal size parameter instead of NativeInt.}
+function Compat_AllocMem(ASize: Cardinal): Pointer;
+begin
+  Result := FastMM_AllocMem(ASize);
+end;
+
+function Compat_DebugAllocMem(ASize: Cardinal): Pointer;
+begin
+  Result := FastMM_DebugAllocMem(ASize);
+end;
+{$ifend}
+
+{$IFDEF MemoryLoadLibrarySupport}
 
 {$IF Defined( IncludeResource_madExcept )}
   {$IFDEF Win64}
@@ -2696,7 +2760,7 @@ function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; forward;
 {Releases a block of memory back to the operating system.  Returns 0 on success, -1 on failure.}
 function OS_FreeVirtualMemory(APointer: Pointer; ABlockSize: NativeInt): Integer;
 begin
-  if Winapi.Windows.VirtualFree(APointer, 0, MEM_RELEASE) then
+  if VirtualFree(APointer, 0, MEM_RELEASE) then
   begin
     AtomicDecrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
     Result := 0;
@@ -2713,7 +2777,7 @@ var
 begin
   if AReserveOnlyNoReadWriteAccess then
   begin
-    Result := Winapi.Windows.VirtualAlloc(nil, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS);
+    Result := VirtualAlloc(nil, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS);
   end
   else
   begin
@@ -2721,7 +2785,7 @@ begin
       LAllocationFlags := MEM_COMMIT or MEM_TOP_DOWN
     else
       LAllocationFlags := MEM_COMMIT;
-    Result := Winapi.Windows.VirtualAlloc(nil, NativeUInt(ABlockSize), LAllocationFlags, PAGE_READWRITE);
+    Result := VirtualAlloc(nil, NativeUInt(ABlockSize), LAllocationFlags, PAGE_READWRITE);
     {The emergency address space reserve is released when address space runs out for the first time.  This allows some
     subsequent memory allocation requests to succeed in order to allow the application to allocate some memory for error
     handling, etc. in response to the EOutOfMemory exception.  This only applies to 32-bit applications.}
@@ -2750,14 +2814,14 @@ function OS_AllocateVirtualMemoryAtAddress(APAddress: Pointer; ABlockSize: Nativ
   AReserveOnlyNoReadWriteAccess: Boolean): Boolean;
 begin
   {Try to reserve the memory at the given address.  This will fail if the memory at that address is not free.}
-  if Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) = nil then
+  if VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) = nil then
     Exit(False);
 
   {Attempt to commit the memory if it must not be reserved only.}
   if (not AReserveOnlyNoReadWriteAccess)
-    and (Winapi.Windows.VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) = nil) then
+    and (VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) = nil) then
   begin
-    Winapi.Windows.VirtualFree(APAddress, 0, MEM_RELEASE);
+    VirtualFree(APAddress, 0, MEM_RELEASE);
     Exit(False);
   end;
 
@@ -2781,7 +2845,7 @@ procedure OS_GetVirtualMemoryRegionInfo(APRegionStart: Pointer; var AMemoryRegio
 var
   LMemInfo: TMemoryBasicInformation;
 begin
-  if Winapi.Windows.VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo)) > 0 then
+  if VirtualQuery(APRegionStart, LMemInfo, SizeOf(LMemInfo)) > 0 then
   begin
     AMemoryRegionInfo.RegionStartAddress := LMemInfo.BaseAddress;
     AMemoryRegionInfo.RegionSize := LMemInfo.RegionSize;
@@ -2817,19 +2881,19 @@ end;
 current thread is unable to make any progress, because it is waiting for locked resources.}
 procedure OS_AllowOtherThreadToRun; inline;
 begin
-  Winapi.Windows.SwitchToThread;
+  SwitchToThread;
 end;
 
 {Returns the current process ID.}
 function OS_GetCurrentProcessID: Cardinal; inline;
 begin
-  Result := Winapi.Windows.GetCurrentProcessId;
+  Result := GetCurrentProcessId;
 end;
 
 {Returns the thread ID for the calling thread.}
 function OS_GetCurrentThreadID: Cardinal; inline;
 begin
-  Result := Winapi.Windows.GetCurrentThreadID;
+  Result := GetCurrentThreadID;
 end;
 
 {Returns the current system date and time.  The time is in 24 hour format.}
@@ -2837,7 +2901,7 @@ procedure OS_GetCurrentDateTime(var AYear, AMonth, ADay, AHour, AMinute, ASecond
 var
   LSystemTime: TSystemTime;
 begin
-  Winapi.Windows.GetLocalTime(LSystemTime);
+  GetLocalTime(LSystemTime);
   AYear := LSystemTime.wYear;
   AMonth := LSystemTime.wMonth;
   ADay := LSystemTime.wDay;
@@ -2851,7 +2915,7 @@ end;
 after 49.7 days.}
 function OS_GetMillisecondsSinceStartup: Cardinal;
 begin
-  Result := Winapi.Windows.GetTickCount;
+  Result := GetTickCount;
 end;
 
 procedure OS_MillisecondsSinceStartupToDateTime(AMillisecondsSinceStartup: Cardinal;
@@ -2862,14 +2926,14 @@ var
   LTimeDelta: Cardinal;
 begin
   {Get the current time, as well as the delta between the current time and the required timestamp.}
-  Winapi.Windows.GetLocalTime(LSystemTime);
+  GetLocalTime(LSystemTime);
   LTimeDelta := OS_GetMillisecondsSinceStartup - AMillisecondsSinceStartup;
 
   {Convert the current time to a format in which the delta can be subtracted easily, subtract the delta, and then
   convert it back.}
-  Winapi.Windows.SystemTimeToFileTime(LSystemTime, LFileTime);
+  SystemTimeToFileTime(LSystemTime, LFileTime);
   Dec(Int64(LFileTime), Int64(LTimeDelta) * 10000);
-  Winapi.Windows.FileTimeToSystemTime(LFileTime, LSystemTime);
+  FileTimeToSystemTime(LFileTime, LSystemTime);
 
   AYear := LSystemTime.wYear;
   AMonth := LSystemTime.wMonth;
@@ -2893,7 +2957,7 @@ begin
   if AReturnLibraryFilename and IsLibrary then
     LModuleHandle := HInstance;
 
-  LNumChars := Winapi.Windows.GetModuleFileNameW(LModuleHandle, Result, Cardinal(CharCount(APBufferEnd, APFilenameBuffer)));
+  LNumChars := GetModuleFileNameW(LModuleHandle, Result, Cardinal(CharCount(APBufferEnd, APFilenameBuffer)));
   Inc(Result, LNumChars);
 end;
 
@@ -2907,7 +2971,7 @@ begin
     Exit;
 
   LBufferSize := Cardinal((NativeUInt(APBufferEnd) - NativeUInt(Result)) div SizeOf(WideChar));
-  LNumChars := Winapi.Windows.GetEnvironmentVariableW(APEnvironmentVariableName, Result, LBufferSize);
+  LNumChars := GetEnvironmentVariableW(APEnvironmentVariableName, Result, LBufferSize);
   if LNumChars < LBufferSize then
     Inc(Result, LNumChars);
 end;
@@ -2917,13 +2981,13 @@ function OS_FileExists(APFileName: PWideChar): Boolean;
 begin
   {This will return True for folders and False for files that are locked by another process, but is "good enough" for
   the purpose for which it will be used.}
-  Result := Winapi.Windows.GetFileAttributesW(APFileName) <> INVALID_FILE_ATTRIBUTES;
+  Result := GetFileAttributesW(APFileName) <> INVALID_FILE_ATTRIBUTES;
 end;
 
 {Attempts to delete the file.  Returns True if it was successfully deleted.}
 function OS_DeleteFile(APFileName: PWideChar): Boolean;
 begin
-  Result := Winapi.Windows.DeleteFileW(APFileName);
+  Result := DeleteFileW(APFileName);
 end;
 
 {Opens the given file for writing, returning the file handle.  If the file does not exist it will be created.  The file
@@ -2933,15 +2997,15 @@ var
   LNewPos: Int64;
 begin
   {Try to open/create the file in read/write mode.}
-  AFileHandle := Winapi.Windows.CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
+  AFileHandle := CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
     FILE_ATTRIBUTE_NORMAL, 0);
   if AFileHandle = INVALID_HANDLE_VALUE then
     Exit(False);
 
   {Move the file pointer to the end of the file}
-  if not Winapi.Windows.SetFilePointerEx(AFileHandle, 0, @LNewPos, FILE_END) then
+  if not SetFilePointerEx(AFileHandle, 0, @LNewPos, FILE_END) then
   begin
-    Winapi.Windows.CloseHandle(AFileHandle);
+    CloseHandle(AFileHandle);
     AFileHandle := INVALID_HANDLE_VALUE;
     Exit(False);
   end;
@@ -2954,30 +3018,30 @@ function OS_WriteFile(AFileHandle: THandle; APData: Pointer; ADataSizeInBytes: I
 var
   LBytesWritten: Cardinal;
 begin
-  Result := Winapi.Windows.WriteFile(AFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil)
+  Result := WriteFile(AFileHandle, APData^, Cardinal(ADataSizeInBytes), LBytesWritten, nil)
     and (LBytesWritten = Cardinal(ADataSizeInBytes));
 end;
 
 {Closes the given file handle}
 procedure OS_CloseFile(AFileHandle: THandle);
 begin
-  Winapi.Windows.CloseHandle(AFileHandle);
+  CloseHandle(AFileHandle);
 end;
 
 procedure OS_OutputDebugString(APDebugMessage: PWideChar); inline;
 begin
-  Winapi.Windows.OutputDebugString(APDebugMessage);
+  OutputDebugString(APDebugMessage);
 end;
 
 procedure OS_DebugBreak; inline;
 begin
-  Winapi.Windows.DebugBreak;
+  DebugBreak;
 end;
 
 {Shows a message box if the program is not showing one already.}
 procedure OS_ShowMessageBox(APText, APCaption: PWideChar);
 begin
-  Winapi.Windows.MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
+  MessageBoxW(0, APText, APCaption, MB_OK or MB_ICONERROR or MB_TASKMODAL or MB_DEFAULT_DESKTOP_ONLY);
 end;
 
 
@@ -9772,19 +9836,19 @@ begin
   Result := nil;
 
   {Try to open the shared memory manager file mapping}
-  LLocalMappingObjectHandle := Winapi.Windows.OpenFileMappingA(FILE_MAP_READ, False, @SharingFileMappingObjectName);
+  LLocalMappingObjectHandle := OpenFileMappingA(FILE_MAP_READ, False, @SharingFileMappingObjectName);
 
   {Is a memory manager in this process sharing its memory manager?}
   if LLocalMappingObjectHandle <> 0 then
   begin
     {Map a view of the shared memory and get the address of the shared memory manager}
-    LPMapAddress := Winapi.Windows.MapViewOfFile(LLocalMappingObjectHandle, FILE_MAP_READ, 0, 0, 0);
+    LPMapAddress := MapViewOfFile(LLocalMappingObjectHandle, FILE_MAP_READ, 0, 0, 0);
     if LPMapAddress <> nil then
     begin
       Result := PPointer(LPMapAddress)^;
-      Winapi.Windows.UnmapViewOfFile(LPMapAddress);
+      UnmapViewOfFile(LPMapAddress);
     end;
-    Winapi.Windows.CloseHandle(LLocalMappingObjectHandle);
+    CloseHandle(LLocalMappingObjectHandle);
   end;
 end;
 
@@ -9867,14 +9931,14 @@ begin
     Exit(False);
 
   {Create the memory mapped file.}
-  SharingFileMappingObjectHandle := Winapi.Windows.CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
+  SharingFileMappingObjectHandle := CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
     SizeOf(Pointer), SharingFileMappingObjectName);
   if SharingFileMappingObjectHandle = 0 then
     Exit(False);
 
   {Map a view of the memory.}
   if GetLastError <> ERROR_ALREADY_EXISTS then
-    LPMapAddress := Winapi.Windows.MapViewOfFile(SharingFileMappingObjectHandle, FILE_MAP_WRITE, 0, 0, 0)
+    LPMapAddress := MapViewOfFile(SharingFileMappingObjectHandle, FILE_MAP_WRITE, 0, 0, 0)
   else
     LPMapAddress := nil;
   {The file mapping should not already exist, and MapViewOfFile should never fail either, but handle potential errors
@@ -9888,7 +9952,7 @@ begin
 
   {Set a pointer to this memory manager and unmap the file.}
   PPointer(LPMapAddress)^ := @InstalledMemoryManager;
-  Winapi.Windows.UnmapViewOfFile(LPMapAddress);
+  UnmapViewOfFile(LPMapAddress);
 
   {Successfully sharing this MM}
   Result := True;
@@ -10354,7 +10418,13 @@ const
 var
   LLeakSummary: TMemoryLeakSummary;
 begin
+{$if CompilerVersion < 21}
+  {Delphi 2009:  Default() on this large record generates faulty code that corrupts the stack frames of the callers
+  (leading to a crash during RTL shutdown).  FillChar is functionally equivalent for this record.}
+  FillChar(LLeakSummary, SizeOf(TMemoryLeakSummary), 0);
+{$else}
   LLeakSummary := Default(TMemoryLeakSummary);
+{$ifend}
 
   FastMM_WalkBlocks(FastMM_PerformMemoryLeakCheck_CallBack, [btLargeBlock, btMediumBlock, btSmallBlock], True,
     @LLeakSummary, CFastMM_PerformMemoryLeakCheck_LockTimeout);
@@ -10526,7 +10596,7 @@ var
 {$endif}
 begin
 {$ifdef X86ASM}
-  LSSE2Available := System.TestSSE and 2 <> 0; //Bit 1 = 1 means the CPU supports SSE2
+  LSSE2Available := {$if CompilerVersion < 23}Compat_TestSSE{$else}System.TestSSE{$ifend} and 2 <> 0; //Bit 1 = 1 means the CPU supports SSE2
 {$endif}
 
   case ASmallBlockSize of
@@ -10883,7 +10953,7 @@ begin
     else
       LNewMemoryManager.FreeMem := FastMM_FreeMem_EraseBeforeFree;
     LNewMemoryManager.ReallocMem := FastMM_ReallocMem;
-    LNewMemoryManager.AllocMem := FastMM_AllocMem;
+    LNewMemoryManager.AllocMem := {$if CompilerVersion < 23}Compat_AllocMem{$else}FastMM_AllocMem{$ifend};
     LNewMemoryManager.RegisterExpectedMemoryLeak := FastMM_RegisterExpectedMemoryLeak;
     LNewMemoryManager.UnregisterExpectedMemoryLeak := FastMM_UnregisterExpectedMemoryLeak;
   end
@@ -10892,7 +10962,7 @@ begin
     LNewMemoryManager.GetMem := FastMM_DebugGetMem;
     LNewMemoryManager.FreeMem := FastMM_DebugFreeMem;
     LNewMemoryManager.ReallocMem := FastMM_DebugReallocMem;
-    LNewMemoryManager.AllocMem := FastMM_DebugAllocMem;
+    LNewMemoryManager.AllocMem := {$if CompilerVersion < 23}Compat_DebugAllocMem{$else}FastMM_DebugAllocMem{$ifend};
     LNewMemoryManager.RegisterExpectedMemoryLeak := FastMM_RegisterExpectedMemoryLeak;
     LNewMemoryManager.UnregisterExpectedMemoryLeak := FastMM_UnregisterExpectedMemoryLeak;
   end;
@@ -10957,12 +11027,12 @@ begin
   if ( DebugSupportLibraryHandle <> 0 ) {$IFDEF MemoryLoadLibrarySupport}OR Assigned( DebugSupportLibraryRHandle ){$ENDIF} then
     Exit(True);
 
-  DebugSupportLibraryHandle := Winapi.Windows.LoadLibrary(FastMM_DebugSupportLibraryName);
+  DebugSupportLibraryHandle := LoadLibrary(FastMM_DebugSupportLibraryName);
   if DebugSupportLibraryHandle <> 0 then
   begin
-    DebugLibrary_GetRawStackTrace := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
-    DebugLibrary_GetFrameBasedStackTrace := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetFrameBasedStackTrace'));
-    DebugLibrary_LogStackTrace_Legacy := Winapi.Windows.GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTrace'));
+    DebugLibrary_GetRawStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
+    DebugLibrary_GetFrameBasedStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetFrameBasedStackTrace'));
+    DebugLibrary_LogStackTrace_Legacy := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTrace'));
   end
   else
   {$IFDEF MemoryLoadLibrarySupport}
@@ -11028,7 +11098,7 @@ begin
 {$ifndef FastMM_DebugLibraryStaticDependency}
   if ( DebugSupportLibraryHandle <> 0 ) then
     begin
-    Winapi.Windows.FreeLibrary(DebugSupportLibraryHandle);
+    FreeLibrary(DebugSupportLibraryHandle);
     DebugSupportLibraryHandle := 0;
     end
   {$IFDEF MemoryLoadLibrarySupport}
@@ -11384,6 +11454,7 @@ begin
     Result := False;
 end;
 
+
 function FastMM_Finalize: Boolean;
 begin
   if not UnitCurrentlyInitialized then
@@ -11392,8 +11463,10 @@ begin
 
   {Prevent a potential crash when the finalization code in system.pas tries to free PreferredLanguagesOverride after
   FastMM has been uninstalled:  https://quality.embarcadero.com/browse/RSP-16796}
+{$if CompilerVersion >= 23} {SetLocaleOverride and the RSP-16796 issue do not exist in older RTL versions.}
   if CurrentInstallationState = mmisInstalled then
     SetLocaleOverride('');
+{$ifend}
 
   {All pending frees must be released before a leak check can be performed.}
   FastMM_ProcessAllPendingFrees;
@@ -11404,7 +11477,9 @@ begin
 
   {Do a memory leak check if required.}
   if [mmetUnexpectedMemoryLeakDetail, mmetUnexpectedMemoryLeakSummary] * (FastMM_OutputDebugStringEvents + FastMM_LogToFileEvents + FastMM_MessageBoxEvents) <> [] then
+  begin
     FastMM_PerformMemoryLeakCheck;
+  end;
 
   if not FastMM_NeverUninstall then
   begin
