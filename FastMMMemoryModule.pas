@@ -258,6 +258,53 @@ uses
   {$IFDEF USE_STREAMS},Classes, JclCompression{$ENDIF}
   ;
 
+{$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+{The module bookkeeping (tModuleManager.fItems, the FileName strings and module.modules) must stay alive until after
+FastMM's shutdown leak check, because the debug support DLL may still be needed to convert the stack traces of leaked
+blocks to text (FastMM_FreeDebugSupportLibrary is called after the leak check).  Without countermeasures these blocks
+are reported as (false positive) leaks, so - following the pattern of tModuleManager.Create, which already registers
+the instance itself - they are registered as expected leaks and unregistered when they are actually freed.  FastMM
+matches registered pointers against the block base as returned by GetMem, so for strings and dynamic arrays the RTL
+header offset must be subtracted.}
+function DynArrayBlockBase( ADynArray : Pointer ) : Pointer;
+begin
+  if NOT Assigned( ADynArray ) then
+    result := nil
+  else // TDynArrayRec: RefCnt + Length (+ padding under 64-bit)
+    result := Pointer( PAnsiChar( ADynArray ) - {$IFDEF CPUX64}16{$ELSE}8{$ENDIF} );
+end;
+
+function StringBlockBase( AString : Pointer ) : Pointer;
+begin
+  if NOT Assigned( AString ) then
+    result := nil
+  else // StrRec: (CodePage + ElemSize +) RefCnt + Length (+ padding under 64-bit)
+    result := Pointer( PAnsiChar( AString ) - {$IFDEF UNICODE}{$IFDEF CPUX64}16{$ELSE}12{$ENDIF}{$ELSE}8{$ENDIF} );
+end;
+
+procedure RegisterLeakBlock( ABlockBase : Pointer );
+begin
+  if NOT Assigned( ABlockBase ) then
+    Exit;
+  {$if Declared( FastMM_RegisterExpectedMemoryLeak )}
+  FastMM_RegisterExpectedMemoryLeak( ABlockBase );
+  {$ELSE}
+  RegisterExpectedMemoryLeak( ABlockBase );
+  {$IFEND}
+end;
+
+procedure UnregisterLeakBlock( ABlockBase : Pointer );
+begin
+  if NOT Assigned( ABlockBase ) then
+    Exit;
+  {$if Declared( FastMM_UnregisterExpectedMemoryLeak )}
+  FastMM_UnregisterExpectedMemoryLeak( ABlockBase );
+  {$ELSE}
+  UnregisterExpectedMemoryLeak( ABlockBase );
+  {$IFEND}
+end;
+{$IFEND Defined( FastMM4 ) OR Defined( FastMM5 )}
+
   { ++++++++++++++++++++++++++++++++++++++++
     ***  Missing Windows API Definitions ***
     ---------------------------------------- }
@@ -1264,8 +1311,17 @@ begin
       end;
 
     try
+      {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+      UnregisterLeakBlock( DynArrayBlockBase( Pointer( module.modules ) ) );
+      {$IFEND}
       SetLength( module.modules, Length( module.modules )+1 );
+      {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+      RegisterLeakBlock( DynArrayBlockBase( Pointer( module.modules ) ) );
+      {$IFEND}
     except
+      {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+      RegisterLeakBlock( DynArrayBlockBase( Pointer( module.modules ) ) );
+      {$IFEND}
       FreeLibrary_Internal( handle );
       SetLastError( ERROR_OUTOFMEMORY );
       Result := False;
@@ -1411,10 +1467,21 @@ begin
 end;
 
 destructor tModuleManager.Destroy;
+{$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+var
+  i : Integer;
+{$IFEND}
 begin
   {$IFDEF UnloadAllOnFinalize}
   UnloadAll;
   {$ENDIF UnloadAllOnFinalize}
+  {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+  {$IF Defined( ALLOW_LOAD_FILES ) OR Defined( LOAD_FROM_RESOURCE )}
+  for i := Low( fItems ) to High( fItems ) do
+    UnregisterLeakBlock( StringBlockBase( Pointer( fItems[ i ].FileName ) ) );
+  {$IFEND}
+  UnregisterLeakBlock( DynArrayBlockBase( Pointer( fItems ) ) );
+  {$IFEND}
   SetLength( fItems, 0 );
   {$IFDEF GetModuleHandleCriticalSection}
   fCrit.Free;
@@ -1444,7 +1511,14 @@ begin
         fItems[ i ].Data     := Data;
       {$ENDIF}
       {$IF Defined( ALLOW_LOAD_FILES ) OR Defined( LOAD_FROM_RESOURCE )}
+      {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+      UnregisterLeakBlock( StringBlockBase( Pointer( fItems[ i ].FileName ) ) );
+      {$IFEND}
       fItems[ i ].FileName   := Name;
+      {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+      UniqueString( fItems[ i ].FileName ); // sole ownership, so the expected leak registration tracks this block
+      RegisterLeakBlock( StringBlockBase( Pointer( fItems[ i ].FileName ) ) );
+      {$IFEND}
       {$IFEND}
       {$IFDEF LOAD_FROM_RESOURCE}
       fItems[ i ].IsResource := IsResource;
@@ -1457,11 +1531,21 @@ begin
       end;
     end;
 
+  {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+  UnregisterLeakBlock( DynArrayBlockBase( Pointer( fItems ) ) );
+  {$IFEND}
   SetLength( fItems, Length( fItems )+1 );
+  {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+  RegisterLeakBlock( DynArrayBlockBase( Pointer( fItems ) ) );
+  {$IFEND}
   fItems[ High( fItems ) ].Handle   := Handle;
   fItems[ High( fItems ) ].Data     := Data;
   {$IF Defined( ALLOW_LOAD_FILES ) OR Defined( LOAD_FROM_RESOURCE )}
   fItems[ High( fItems ) ].FileName := Name;
+  {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+  UniqueString( fItems[ High( fItems ) ].FileName ); // sole ownership, so the expected leak registration tracks this block
+  RegisterLeakBlock( StringBlockBase( Pointer( fItems[ High( fItems ) ].FileName ) ) );
+  {$IFEND}
   {$IFEND}
   {$IFDEF LOAD_FROM_RESOURCE}
   fItems[ High( fItems ) ].IsResource := IsResource;
@@ -1485,9 +1569,18 @@ begin
 //  {$IFDEF GetModuleHandleCriticalSection}
 //  fCrit.Enter;
 //  {$ENDIF GetModuleHandleCriticalSection}
+  {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+  {$IF Defined( ALLOW_LOAD_FILES ) OR Defined( LOAD_FROM_RESOURCE )}
+  UnregisterLeakBlock( StringBlockBase( Pointer( fItems[ ID ].FileName ) ) ); // freed by the shift below
+  {$IFEND}
+  UnregisterLeakBlock( DynArrayBlockBase( Pointer( fItems ) ) );
+  {$IFEND}
   for i := ID to High( fItems )-1 do
     fItems[ i ] := fItems[ i+1 ];
   SetLength( fItems, Length( fItems )-1 );
+  {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+  RegisterLeakBlock( DynArrayBlockBase( Pointer( fItems ) ) );
+  {$IFEND}
 //  {$IFDEF GetModuleHandleCriticalSection}
 //  fCrit.Leave;
 //  {$ENDIF GetModuleHandleCriticalSection}
@@ -3017,6 +3110,9 @@ begin
       if ( module.modules[ i ].Handle <> 0 ) {$IFDEF GetModuleHandle_BuildImportTable}and module.modules[ i ].Free{$ENDIF} then
         FreeLibrary_Internal( module.modules[ i ].Handle );
       end;
+    {$IF Defined( FastMM4 ) OR Defined( FastMM5 )}
+    UnregisterLeakBlock( DynArrayBlockBase( Pointer( module.modules ) ) );
+    {$IFEND}
     SetLength( module.modules, 0 );
     end;
 
