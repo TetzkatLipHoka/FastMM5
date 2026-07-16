@@ -401,11 +401,11 @@ type
     DebugBlockFlags: SmallInt;
     {Returns a pointer to the start of the debug footer.  The debug footer consists of the footer checksum (dword),
     followed by the allocation stack trace and then the free stack trace.}
-    function DebugFooterPtr: PCardinal; inline;
+    function DebugFooterPtr: PCardinal; {$IF CompilerVersion >= 18}inline;{$IFEND}
     {Returns a pointer to the first entry in the allocation stack trace in the debug footer.}
-    function DebugFooter_AllocationStackTracePtr: PNativeUInt; inline;
+    function DebugFooter_AllocationStackTracePtr: PNativeUInt; {$IF CompilerVersion >= 18}inline;{$IFEND}
     {Returns a pointer to the first entry in the free stack trace in the debug footer.}
-    function DebugFooter_FreeStackTracePtr: PNativeUInt; inline;
+    function DebugFooter_FreeStackTracePtr: PNativeUInt; {$IF CompilerVersion >= 18}inline;{$IFEND}
     {Calculate the header checksum}
     function CalculateHeaderCheckSum: Cardinal;
     {Calculate the checksum for the stack traces that follow after the user data.}
@@ -2815,14 +2815,18 @@ function OS_AllocateVirtualMemoryAtAddress(APAddress: Pointer; ABlockSize: Nativ
 begin
   {Try to reserve the memory at the given address.  This will fail if the memory at that address is not free.}
   if VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_RESERVE, PAGE_NOACCESS) = nil then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
 
   {Attempt to commit the memory if it must not be reserved only.}
   if (not AReserveOnlyNoReadWriteAccess)
     and (VirtualAlloc(APAddress, NativeUInt(ABlockSize), MEM_COMMIT, PAGE_READWRITE) = nil) then
   begin
     VirtualFree(APAddress, 0, MEM_RELEASE);
-    Exit(False);
+    Result := False;
+    Exit;
   end;
 
   {Update the memory usage, and check whether MemoryUsageLimit has been reached.}
@@ -2834,7 +2838,8 @@ begin
     MemoryUsageLimitGraceAmount := 0;
 
     OS_FreeVirtualMemory(APAddress, ABlockSize);
-    Exit(False);
+    Result := False;
+    Exit;
   end;
 
   Result := True;
@@ -2879,19 +2884,19 @@ end;
 
 {If another thread is ready to run on the current CPU, give it a chance to execute.  This is typically called if the
 current thread is unable to make any progress, because it is waiting for locked resources.}
-procedure OS_AllowOtherThreadToRun; inline;
+procedure OS_AllowOtherThreadToRun; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   SwitchToThread;
 end;
 
 {Returns the current process ID.}
-function OS_GetCurrentProcessID: Cardinal; inline;
+function OS_GetCurrentProcessID: Cardinal; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   Result := GetCurrentProcessId;
 end;
 
 {Returns the thread ID for the calling thread.}
-function OS_GetCurrentThreadID: Cardinal; inline;
+function OS_GetCurrentThreadID: Cardinal; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   Result := GetCurrentThreadID;
 end;
@@ -3000,14 +3005,18 @@ begin
   AFileHandle := CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
     FILE_ATTRIBUTE_NORMAL, 0);
   if AFileHandle = INVALID_HANDLE_VALUE then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
 
   {Move the file pointer to the end of the file}
   if not SetFilePointerEx(AFileHandle, 0, @LNewPos, FILE_END) then
   begin
     CloseHandle(AFileHandle);
     AFileHandle := INVALID_HANDLE_VALUE;
-    Exit(False);
+    Result := False;
+    Exit;
   end;
 
   Result := True;
@@ -3028,12 +3037,12 @@ begin
   CloseHandle(AFileHandle);
 end;
 
-procedure OS_OutputDebugString(APDebugMessage: PWideChar); inline;
+procedure OS_OutputDebugString(APDebugMessage: PWideChar); {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   OutputDebugString(APDebugMessage);
 end;
 
-procedure OS_DebugBreak; inline;
+procedure OS_DebugBreak; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   DebugBreak;
 end;
@@ -3067,7 +3076,7 @@ end;
 {--------Logging support subroutines-------}
 {------------------------------------------}
 
-function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; inline;
+function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   Result := Integer((NativeInt(APFirstFreeChar) - NativeInt(APBufferStart)) div SizeOf(WideChar));
 end;
@@ -3197,7 +3206,10 @@ begin
 
   LPBufferStart := OS_AllocateVirtualMemory(LBufferSize, False);
   if LPBufferStart = nil then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
 
   try
     LPBufferPos := LPBufferStart;
@@ -3234,7 +3246,8 @@ var
     if (NativeUInt(APAddress) <= 65535)
       or (AMustBePointerAligned and (NativeUInt(APAddress) and (SizeOf(Pointer) - 1) <> 0)) then
     begin
-      Exit(False);
+      Result := False;
+      Exit;
     end;
 
     {Fetch the memory access flags for the region surrounding the pointer, if required.}
@@ -3267,7 +3280,10 @@ var
         LParentClassSelfPointer := PPointer(PByte(AClassPointer) + ParentVMTOffset)^;
         {Is the "Self" pointer valid?}
         if PPointer(PByte(AClassPointer) + SelfPtrVMTOffset)^ <> AClassPointer then
-          Exit(False);
+          begin
+          Result := False;
+          Exit;
+          end;
 
         {Do a sanity check on the pointer to the name of the class.  The short string containing the name is always just
         after the VMT.}
@@ -3275,18 +3291,23 @@ var
         if (NativeUInt(LPClassNameString) - NativeUInt(AClassPointer) > CMaxVMTSize)
           or (not IsValidVMTAddress(LPClassNameString, False)) then
         begin
-          Exit(False);
+          Result := False;
+          Exit;
         end;
 
       except
         {There is a potential race condition between the call to IsValidVMTAddress and the checks above:  If another
         thread frees the block at an inopportune moment then the reads above may cause an A/V.  If this happens then
         the AClassPointer cannot be a class.}
-        Exit(False);
+        Result := False;
+        Exit;
       end;
       {No more parent classes?}
       if LParentClassSelfPointer = nil then
-        Exit(True);
+        begin
+        Result := True;
+        Exit;
+        end;        
       {Recursively check the parent class for validity.}
       Result := IsValidVMTAddress(LParentClassSelfPointer, True)
         and InternalIsValidClass(LParentClassSelfPointer^, ADepth + 1);
@@ -3336,13 +3357,19 @@ var
 begin
   {Check that the reference count is within a reasonable range}
   if PStrRec(APMemoryBlock).refCnt > CMaxRefCount then
-    Exit(sdtNotAString);
+    begin
+    Result := sdtNotAString;
+    Exit;
+    end;     
 
   {Element size must be either 1 (Ansi) or 2 (Unicode)}
 {$ifndef OldStringHeader}
   LElementSize := PStrRec(APMemoryBlock).elemSize;
   if (LElementSize <> 1) and (LElementSize <> 2) then
-    Exit(sdtNotAString);
+    begin
+    Result := sdtNotAString;
+    Exit;
+    end; 
 {$else}
   LElementSize := 1;
 {$endif}
@@ -3352,7 +3379,8 @@ begin
   if (LStringLength <= 0)
     or (LStringLength >= (AAvailableSpaceInBlock - SizeOf(StrRec)) div LElementSize) then
   begin
-    Exit(sdtNotAString);
+    Result := sdtNotAString;
+    Exit;
   end;
 
   {Check for no characters outside the expected range.  If there are, then it is probably not a string.}
@@ -3362,13 +3390,19 @@ begin
 
     {There must be a trailing #0}
     if LPAnsiString[LStringLength] <> #0 then
-      Exit(sdtNotAString);
+      begin
+      Result := sdtNotAString;
+      Exit;
+      end; 
 
     {Check that all characters are in the range considered valid.}
     for LCharInd := 0 to LStringLength - 1 do
     begin
       if LPAnsiString[LCharInd] < CMinCharCode then
-        Exit(sdtNotAString);
+        begin
+        Result := sdtNotAString;
+        Exit;
+        end; 
     end;
 
     Result := sdtAnsiString;
@@ -3379,13 +3413,19 @@ begin
 
     {There must be a trailing #0}
     if LPUnicodeString[LStringLength] <> #0 then
-      Exit(sdtNotAString);
+      begin
+      Result := sdtNotAString;
+      Exit;
+      end; 
 
     {Check that all characters are in the range considered valid.}
     for LCharInd := 0 to LStringLength - 1 do
     begin
       if LPUnicodeString[LCharInd] < CMinCharCode then
-        Exit(sdtNotAString);
+        begin
+        Result := sdtNotAString;
+        Exit;
+        end; 
     end;
 
     Result := sdtUnicodeString;
@@ -3405,7 +3445,10 @@ begin
   {Attempt to determine the class type for the block.}
   LLeakedClass := FastMM_DetectClassInstance(APMemoryBlock);
   if LLeakedClass <> nil then
-    Exit(NativeUInt(LLeakedClass));
+    begin
+    Result := NativeUInt(LLeakedClass);
+    Exit;
+    end;     
 
   LStringType := FastMM_DetectStringData(APMemoryBlock, AAvailableSpaceInBlock);
   Result := NativeUInt(Ord(LStringType));
@@ -4411,13 +4454,13 @@ end;
 {$ifend}
 
 {Returns True if the block is not in use.}
-function BlockIsFree(APSmallMediumOrLargeBlock: Pointer): Boolean; inline;
+function BlockIsFree(APSmallMediumOrLargeBlock: Pointer): Boolean; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   Result := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and CBlockIsFreeFlag <> 0;
 end;
 
 {Tags a block as free, without affecting any other flags.}
-procedure SetBlockIsFreeFlag(APSmallMediumOrLargeBlock: Pointer; ABlockIsFree: Boolean); inline;
+procedure SetBlockIsFreeFlag(APSmallMediumOrLargeBlock: Pointer; ABlockIsFree: Boolean); {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   if ABlockIsFree then
     PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] or CBlockIsFreeFlag
@@ -4426,13 +4469,13 @@ begin
 end;
 
 {Returns True if the block contains a debug sub-block.}
-function BlockHasDebugInfo(APSmallMediumOrLargeBlock: Pointer): Boolean; inline;
+function BlockHasDebugInfo(APSmallMediumOrLargeBlock: Pointer): Boolean; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   Result := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] and CHasDebugInfoFlag <> 0;
 end;
 
 {Tags a block as having debug info, without affecting any other flags.}
-procedure SetBlockHasDebugInfo(APSmallMediumOrLargeBlock: Pointer; ABlockHasDebugInfo: Boolean); inline;
+procedure SetBlockHasDebugInfo(APSmallMediumOrLargeBlock: Pointer; ABlockHasDebugInfo: Boolean); {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   if ABlockHasDebugInfo then
     PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] := PBlockStatusFlags(APSmallMediumOrLargeBlock)[-1] or CHasDebugInfoFlag
@@ -4441,7 +4484,7 @@ begin
 end;
 
 {Calculates the size of a debug block footer, given the number of stack trace entries.}
-function CalculateDebugBlockFooterSize(AStackTraceDepth: Byte): NativeInt; inline;
+function CalculateDebugBlockFooterSize(AStackTraceDepth: Byte): NativeInt; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   {The debug footer consists of a dword checksum, followed by the allocation and free stack traces.}
   Result := CDebugBlockFooterCheckSumSize + AStackTraceDepth * (2 * SizeOf(Pointer));
@@ -4485,12 +4528,14 @@ begin
   if APDebugBlockHeader.CalculateHeaderCheckSum <> APDebugBlockHeader.HeaderCheckSum then
   begin
     LogDebugBlockHeaderInvalid(APDebugBlockHeader);
-    Exit(False);
+    Result := False;
+    Exit;
   end;
   if APDebugBlockHeader.CalculateFooterCheckSum <> APDebugBlockHeader.DebugFooterPtr^ then
   begin
     LogDebugBlockFooterInvalid(APDebugBlockHeader);
-    Exit(False);
+    Result := False;
+    Exit;
   end;
 
   Result := True;
@@ -4912,13 +4957,19 @@ begin
   {Is this a debug block that has already been freed?  If not, it could be a bad pointer value, in which case there's
   not much that can be done to provide additional error information.}
   if PBlockStatusFlags(APointer)[-1] <> (CBlockIsFreeFlag or CIsDebugBlockFlag) then
-    Exit(-1);
+    begin
+    Result := -1;
+    Exit;
+    end; 
 
   {Check that the debug block header is intact.  If it is, then a meaningful error may be returned.}
   LPDebugBlockHeader := @PFastMM_DebugBlockHeader(APointer)[-1];
   LHeaderChecksum := LPDebugBlockHeader.CalculateHeaderCheckSum;
   if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
-    Exit(-1);
+    begin
+    Result := -1;
+    Exit;
+    end; 
 
   LTokenValues := Default(TEventLogTokenValues);
 
@@ -5072,12 +5123,18 @@ var
 begin
   {Process the pending free lists of all arenas.}
   if ProcessLargeBlockPendingFrees <> 0 then
-    Exit(nil);
+    begin
+    Result := nil;
+    Exit;
+    end; 
 
   {Pad the block size to include the header and granularity, checking for overflow.}
   LLargeBlockActualSize := (ASize + CLargeBlockHeaderSize + CLargeBlockGranularity - 1) and -CLargeBlockGranularity;
   if LLargeBlockActualSize <= CMaximumMediumBlockSize then
-    Exit(nil);
+    begin
+    Result := nil;
+    Exit;
+    end; 
 
   {Get the large block.}
   Result := OS_AllocateVirtualMemory(LLargeBlockActualSize, False);
@@ -5211,7 +5268,8 @@ begin
           LPLargeBlockHeader.UserAllocatedSize := ANewSize;
           Inc(LPLargeBlockHeader.ActualBlockSize, LNewSegmentSize);
           LPLargeBlockHeader.BlockIsSegmented := True;
-          Exit(APointer);
+          Result := APointer;
+          Exit;
         end;
       end;
     end;
@@ -5264,7 +5322,7 @@ end;
 {------------------------------------------}
 
 {Takes a user request size and converts it to a size that fits the size of a medium block bin exactly.}
-function RoundUserSizeUpToNextMediumBlockBin(AUserSize: Integer): Integer; inline;
+function RoundUserSizeUpToNextMediumBlockBin(AUserSize: Integer): Integer; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   if AUserSize <= (CMediumBlockMiddleBinsStart - CMediumBlockHeaderSize) then
   begin
@@ -5289,7 +5347,7 @@ end;
 {Determines the appropriate bin number for blocks of AMediumBlockSize.  If AMediumBlockSize is not exactly aligned to a
 bin size then the bin just smaller than AMediumBlockSize will be returned.  It is assumed that AMediumBlockSize <=
 CMaximumMediumBlockSize.}
-function GetBinNumberForMediumBlockSize(AMediumBlockSize: Integer): Integer; inline;
+function GetBinNumberForMediumBlockSize(AMediumBlockSize: Integer): Integer; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   if AMediumBlockSize <= CMediumBlockMiddleBinsStart then
   begin
@@ -5304,23 +5362,23 @@ begin
   end;
 end;
 
-function GetMediumBlockSpan(APMediumBlock: Pointer): PMediumBlockSpanHeader; inline;
+function GetMediumBlockSpan(APMediumBlock: Pointer): PMediumBlockSpanHeader; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   Result := PMediumBlockSpanHeader(NativeUInt(APMediumBlock)
     - (PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSpanOffsetMultiple shl CMediumBlockAlignmentBits));
 end;
 
-function GetMediumBlockSize(APMediumBlock: Pointer): Integer; inline;
+function GetMediumBlockSize(APMediumBlock: Pointer): Integer; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   Result := PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSizeMultiple shl CMediumBlockAlignmentBits;
 end;
 
-procedure SetMediumBlockHeader_SetIsSmallBlockSpan(APMediumBlock: Pointer; AIsSmallBlockSpan: Boolean); inline;
+procedure SetMediumBlockHeader_SetIsSmallBlockSpan(APMediumBlock: Pointer; AIsSmallBlockSpan: Boolean); {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   PMediumBlockHeader(APMediumBlock)[-1].IsSmallBlockSpan := AIsSmallBlockSpan;
 end;
 
-procedure SetMediumBlockHeader_SetMediumBlockSpan(APMediumBlock: Pointer; APMediumBlockSpan: PMediumBlockSpanHeader); inline;
+procedure SetMediumBlockHeader_SetMediumBlockSpan(APMediumBlock: Pointer; APMediumBlockSpan: PMediumBlockSpanHeader); {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   {Store the offset to the medium block span.}
   PMediumBlockHeader(APMediumBlock)[-1].MediumBlockSpanOffsetMultiple :=
@@ -5328,7 +5386,7 @@ begin
 end;
 
 procedure SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock: Pointer; ABlockSize: Integer; ABlockIsFree: Boolean;
-  ABlockHasDebugInfo: Boolean); inline;
+  ABlockHasDebugInfo: Boolean); {$IF CompilerVersion >= 18}inline;{$IFEND}
 var
   LPNextBlock: Pointer;
 begin
@@ -5823,7 +5881,8 @@ begin
     else
     begin
       {There is either no sequential feed span, or it has insufficient space.}
-      Exit(nil);
+      Result := nil;
+      Exit;
     end;
   end;
 {$endif}
@@ -5841,7 +5900,10 @@ begin
   {Retrieve the pending free list pointer.}
   LPPendingFreeBlock := AtomicExchange(APMediumBlockManager.PendingFreeList, nil);
   if LPPendingFreeBlock = nil then
-    Exit(nil);
+    begin
+    Result := nil;
+    Exit;
+    end; 
 
   {Process all the pending frees, but keep the smallest block that is at least AMinimumBlockSize in size (if
   there is one).}
@@ -6526,8 +6588,9 @@ begin
         if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
           or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
         begin
-          Exit(FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
-            LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize));
+          result := FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
+            LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize);
+          Exit;
         end;
 
         {A different thread grabbed the last block, unlock the manager and try the next arena.}
@@ -6589,8 +6652,9 @@ begin
         if ((LPMediumBlockManager.MediumBlockBinGroupBitmap and LLargerBinGroupsMask) <> 0)
           or ((LPMediumBlockManager.MediumBlockBinBitmaps[LMinimumBlockSizeBinGroupNumber] and LMinimumBlockSizeBinMask) <> 0) then
         begin
-          Exit(FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
-            LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize));
+          result := FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(LPMediumBlockManager,
+            LMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize);
+          Exit;
         end;
 
         {3.2) Another thread may have allocated a sequential feed span before the arena could be locked, so a second
@@ -6721,7 +6785,8 @@ begin
           {Unlock the medium blocks}
           LPMediumBlockManager.MediumBlockManagerLocked := 0;
 
-          Exit(APointer);
+          Result := APointer;
+          Exit;
         end;
 
         {Couldn't use the next block, because another thread grabbed it:  Unlock the medium blocks}
@@ -6849,7 +6914,7 @@ end;
 {-----------------------------------------}
 
 procedure SetSmallBlockHeader(APSmallBlock: Pointer; APSmallBlockSpan: PSmallBlockSpanHeader; ABlockIsFree: Boolean;
-  ABlockHasDebugInfo: Boolean); inline;
+  ABlockHasDebugInfo: Boolean); {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   if ABlockIsFree then
   begin
@@ -6888,7 +6953,7 @@ begin
 
 end;
 
-function GetSpanForSmallBlock(APSmallBlock: Pointer): PSmallBlockSpanHeader; inline;
+function GetSpanForSmallBlock(APSmallBlock: Pointer): PSmallBlockSpanHeader; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   Result := Pointer((NativeInt(APSmallBlock) and -CMediumBlockAlignment)
     - (CDropSmallBlockFlagsMask and PBlockStatusFlags(APSmallBlock)[-1]) shl CSmallBlockSpanOffsetBitShift);
@@ -7062,7 +7127,7 @@ begin
 end;
 
 {Returns a small block to the memory pool.  Returns 0 on success.}
-function FastMM_FreeMem_FreeSmallBlock(APSmallBlock: Pointer): Integer; inline;
+function FastMM_FreeMem_FreeSmallBlock(APSmallBlock: Pointer): Integer; {$IF CompilerVersion >= 18}inline;{$IFEND}
 var
   LPSmallBlockSpan: PSmallBlockSpanHeader;
   LPSmallBlockManager: PSmallBlockManager;
@@ -7190,7 +7255,8 @@ begin
   if LPSmallBlockSpan = nil then
   begin
     APSmallBlockManager.SmallBlockManagerLocked := 0;
-    Exit(nil);
+    Result := nil;
+    Exit;
   end;
 
   {Update the medium block header to indicate that this medium block serves as a small block span.}
@@ -7335,7 +7401,10 @@ begin
     LPSequentialFeedSpan := APSmallBlockManager.SequentialFeedSmallBlockSpan;
 
     if LPreviousLastSequentialFeedBlockOffset.IntegerValue <= CSmallBlockSpanHeaderSize then
-      Exit(nil);
+      begin
+      Result := nil;
+      Exit;
+      end; 
 
     if AtomicCmpExchange(APSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerAndABACounter,
       LNewLastSequentialFeedBlockOffset.IntegerAndABACounter,
@@ -7684,11 +7753,17 @@ begin
 
           {Try to reuse a pending free block first.}
           if APSmallBlockManager.PendingFreeList <> nil then
-            Exit(FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager));
+            begin
+            result := FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager);
+            Exit;
+            end;
 
           {Try to allocate a block from the first partially free span.}
           if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
-            Exit(FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager));
+            begin
+            result := FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager);
+            Exit;
+            end;
 
           {Other threads must have taken all the available blocks before the manager could be locked.}
           APSmallBlockManager.SmallBlockManagerLocked := 0;
@@ -7732,11 +7807,17 @@ begin
 
         {Check if there is a pending free list.  If so the first pending free block is returned and the rest are freed.}
         if APSmallBlockManager.PendingFreeList <> nil then
-          Exit(FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager));
+          begin
+          result := FastMM_GetMem_GetSmallBlock_ReusePendingFreeBlockAndUnlockArena(APSmallBlockManager);
+          Exit;
+          end;
 
         {Try to get a block from the first partially free span.}
         if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
-          Exit(FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager));
+          begin
+          result := FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager)
+          Exit;
+          end;
 
         {It's possible another thread could have allocated a new sequential feed span in the meantime, so we need to
         check again before allocating a new one.}
@@ -7751,8 +7832,8 @@ begin
         end;
 
         {Allocate a new sequential feed span and split off a block from it}
-        Exit(FastMM_GetMem_GetSmallBlock_AllocateNewSequentialFeedSpanAndUnlockArena(APSmallBlockManager));
-
+        result := FastMM_GetMem_GetSmallBlock_AllocateNewSequentialFeedSpanAndUnlockArena(APSmallBlockManager);
+        Exit;
       end;
 
       {Try the next small block arena}
@@ -8481,7 +8562,8 @@ begin
     if LBlockHeader and CBlockIsFreeFlag <> 0 then
     begin
       HandleInvalidFreeMemOrReallocMem(APointer, True);
-      Exit(nil);
+      Result := nil;
+      Exit;
     end;
 
     {The old block is not a debug block, so we need to allocate a new debug block and copy the data across.}
@@ -8738,7 +8820,7 @@ end;
 {Adjusts the block information for blocks that contain a debug mode sub-block.  Returns True if the allocation group for
 the block is within the given range, False otherwise.}
 function FastMM_WalkBlocks_CheckAndAdjustForDebugSubBlock(var ABlockInfo: TFastMM_WalkAllocatedBlocks_BlockInfo;
-  AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean; inline;
+  AMinimumAllocationGroup, AMaximumAllocationGroup: Cardinal): Boolean; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   if BlockHasDebugInfo(ABlockInfo.BlockAddress) then
   begin
@@ -9406,14 +9488,20 @@ begin
   begin
     LPMediumBlockManager := @MediumBlockManagers[i];
     if NativeUInt(LPMediumBlockManager.FirstMediumBlockSpanHeader) <> NativeUInt(LPMediumBlockManager) then
-      Exit(True);
+      begin
+      Result := True;
+      Exit;
+      end; 
   end;
 
   for i := 0 to CFastMM_LargeBlockArenaCount - 1 do
   begin
     LPLargeBlockManager := @LargeBlockManagers[i];
     if NativeUInt(LPLargeBlockManager.FirstLargeBlockHeader) <> NativeUInt(LPLargeBlockManager) then
-      Exit(True);
+      begin
+      Result := True;
+      Exit;
+      end; 
   end;
 
   Result := False;
@@ -9923,18 +10011,25 @@ begin
     or FastMM_InstalledMemoryManagerChangedExternally
     or (SharingFileMappingObjectHandle <> 0) then
   begin
-    Exit(False);
+    Result := False;
+    Exit;
   end;
 
   {Check whether another module is already sharing its memory manager}
   if FastMM_FindSharedMemoryManager <> nil then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
 
   {Create the memory mapped file.}
   SharingFileMappingObjectHandle := CreateFileMappingA(INVALID_HANDLE_VALUE, nil, PAGE_READWRITE, 0,
     SizeOf(Pointer), SharingFileMappingObjectName);
   if SharingFileMappingObjectHandle = 0 then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
 
   {Map a view of the memory.}
   if GetLastError <> ERROR_ALREADY_EXISTS then
@@ -9947,7 +10042,8 @@ begin
   begin
     CloseHandle(SharingFileMappingObjectHandle);
     SharingFileMappingObjectHandle := 0;
-    Exit(False);
+    Result := False;
+    Exit;
   end;
 
   {Set a pointer to this memory manager and unmap the file.}
@@ -10479,7 +10575,7 @@ prefetch adjacent cache lines on a cache miss (e.g. the "Adjacent Cache Line Pre
 small block managers are perfectly aligned on cache line (64-byte) boundaries, these prefetch mechanisms may still
 introduce false dependencies.  We do not want the managers for frequently used block sizes to have false dependencies
 between them, so the frequently used (small) sizes are interspersed with the less frequently used (larger) sizes.}
-function SmallBlockManagerIndexFromSizeIndex(ASizeIndex: Integer): Integer; inline;
+function SmallBlockManagerIndexFromSizeIndex(ASizeIndex: Integer): Integer; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
   {Fill up the uneven slots first from the front to the back, and then the even slots from the back to the front.}
   Result := ASizeIndex * 2 + 1;
@@ -10939,7 +11035,10 @@ var
 begin
   {Check that the memory manager has not been changed since the last time it was set.}
   if FastMM_InstalledMemoryManagerChangedExternally then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
 
   {Debug mode or normal memory manager?}
   if DebugModeCounter <= 0 then
@@ -11025,7 +11124,10 @@ begin
 {$ifndef FastMM_DebugLibraryStaticDependency}
   {Already loaded?  If so, return success.}
   if ( DebugSupportLibraryHandle <> 0 ) {$IFDEF MemoryLoadLibrarySupport}OR Assigned( DebugSupportLibraryRHandle ){$ENDIF} then
-    Exit(True);
+    begin
+    Result := True;
+    Exit;
+    end; 
 
   DebugSupportLibraryHandle := LoadLibrary(FastMM_DebugSupportLibraryName);
   if DebugSupportLibraryHandle <> 0 then
@@ -11081,7 +11183,10 @@ function FastMM_FreeDebugSupportLibrary: Boolean;
 begin
 {$ifndef FastMM_DebugLibraryStaticDependency}
   if ( DebugSupportLibraryHandle = 0 ) {$IFDEF MemoryLoadLibrarySupport}AND NOT Assigned( DebugSupportLibraryRHandle ){$ENDIF} then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
 {$endif}
 
   if (@FastMM_GetStackTrace = @DebugLibrary_GetRawStackTrace)
@@ -11437,7 +11542,10 @@ function FastMM_Initialize: Boolean;
 begin
   {Ignore attempts to initialize twice.}
   if UnitCurrentlyInitialized then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
   UnitCurrentlyInitialized := True;
 
   FastMM_InitializeMemoryManager;
@@ -11458,7 +11566,10 @@ end;
 function FastMM_Finalize: Boolean;
 begin
   if not UnitCurrentlyInitialized then
-    Exit(False);
+    begin
+    Result := False;
+    Exit;
+    end;
   UnitCurrentlyInitialized := False;
 
   {Prevent a potential crash when the finalization code in system.pas tries to free PreferredLanguagesOverride after
