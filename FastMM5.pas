@@ -168,6 +168,11 @@ type
   PInt64Array = ^TInt64Array;
 {$ifend}
 
+{$if CompilerVersion < 20} {PUInt64 is not declared before Delphi 2009.}
+type
+  PUInt64 = ^UInt64;
+{$ifend}
+
 {$RangeChecks Off}
 {$BoolEval Off}
 {$OverflowChecks Off}
@@ -358,7 +363,9 @@ type
   {The debug block header.  Must be a multiple of 64 in order to guarantee that minimum block alignment restrictions
   are honoured.}
   PFastMM_DebugBlockHeader = ^TFastMM_DebugBlockHeader;
-  TFastMM_DebugBlockHeader = packed record
+  {Under compilers without records with methods (pre Delphi 2009) a legacy "object" is used instead:  It has the same
+  memory layout as a packed record, but supports (non-virtual) methods.}
+  TFastMM_DebugBlockHeader = packed {$IFDEF UNICODE}record{$ELSE}object{$ENDIF}
     {The first two pointer sized slots cannot be used by the debug block header.  The medium block manager uses the
     first two pointers in a free block for the free block linked list, and the small block manager uses the first
     pointer for the free block linked list.  This space is thus reserved.}
@@ -515,6 +522,25 @@ type
     100 * AllocatedBytes / (AllocatedBytes + OverheadBytes).}
     EfficiencyPercentage: Double;
   end;
+
+{$IF CompilerVersion < 18}
+  {Compatibility types for compilers released before the FastMM4-based memory manager was integrated into the RTL
+  (i.e. before Delphi 2006):  Under later compilers these are declared in the System unit.  The declarations below
+  are identical to the System unit versions.}
+  TSmallBlockTypeState = packed record
+    {The internal size of the block type}
+    InternalBlockSize: Cardinal;
+    {Useable block size: The number of non-reserved bytes inside the block.}
+    UseableBlockSize: Cardinal;
+    {The number of allocated blocks}
+    AllocatedBlockCount: NativeUInt;
+    {The total address space reserved for this block type (both allocated and free blocks)}
+    ReservedAddressSpace: NativeUInt;
+  end;
+
+  TChunkStatus = (csUnallocated, csAllocated, csReserved, csSysAllocated, csSysReserved);
+  TMemoryMap = array[0..65535] of TChunkStatus;
+{$IFEND}
 
   TFastMM_MemoryManagerState = packed record
     {Small block type states.  SmallBlockTypeCount indicates how many entries in SmallBlockTypeStates are used.}
@@ -987,6 +1013,13 @@ function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxD
   APBuffer: PAnsiChar): PAnsiChar; external CFastMM_DefaultDebugSupportLibraryName name 'LogStackTrace';
 {$endif}
 
+{$if CompilerVersion < 18}
+var
+  {The ReportMemoryLeaksOnShutdown System unit variable was introduced together with the FastMM4-based memory manager
+  in Delphi 2006, so it is declared here for older compilers.}
+  ReportMemoryLeaksOnShutdown: Boolean;
+{$ifend}
+
 implementation
 
 {$IFDEF MemoryLoadLibrarySupport}
@@ -1002,6 +1035,70 @@ uses
 {SetFilePointerEx is not declared in the Windows unit of older Delphi versions.}
 function SetFilePointerEx(hFile: THandle; liDistanceToMove: Int64; lpNewFilePointer: PInt64;
   dwMoveMethod: DWORD): BOOL; stdcall; external kernel32 name 'SetFilePointerEx';
+
+{$if CompilerVersion < 18}
+const
+  {INVALID_FILE_ATTRIBUTES is not declared in the Windows unit of older Delphi versions.}
+  INVALID_FILE_ATTRIBUTES = DWORD($FFFFFFFF);
+
+type
+  {The TMemoryManagerEx record (TMemoryManager extended by AllocMem and the expected memory leak management entries)
+  was introduced together with the FastMM4-based memory manager in Delphi 2006.  Under older compilers it is emulated
+  on top of the legacy TMemoryManager through the GetMemoryManager/SetMemoryManager wrappers below.}
+  TMemoryManagerEx = record
+    {The basic (required) memory manager functionality}
+    GetMem: function(Size: Integer): Pointer;
+    FreeMem: function(P: Pointer): Integer;
+    ReallocMem: function(P: Pointer; Size: Integer): Pointer;
+    {Extended (optional) functionality}
+    AllocMem: function(Size: Cardinal): Pointer;
+    RegisterExpectedMemoryLeak: function(P: Pointer): Boolean;
+    UnregisterExpectedMemoryLeak: function(P: Pointer): Boolean;
+  end;
+  PMemoryManagerEx = ^TMemoryManagerEx;
+
+var
+  {The most recent memory manager passed to the SetMemoryManager emulation below.  It is used to reconstruct the
+  extended entries in GetMemoryManager, since the System unit of older compilers only stores the legacy entries.}
+  LastSetMemoryManagerEx: TMemoryManagerEx;
+
+procedure GetMemoryManager(var AMemoryManager: TMemoryManagerEx);
+var
+  LLegacyMemoryManager: TMemoryManager;
+begin
+  System.GetMemoryManager(LLegacyMemoryManager);
+  if (@LLegacyMemoryManager.GetMem = @LastSetMemoryManagerEx.GetMem)
+    and (@LLegacyMemoryManager.FreeMem = @LastSetMemoryManagerEx.FreeMem)
+    and (@LLegacyMemoryManager.ReallocMem = @LastSetMemoryManagerEx.ReallocMem) then
+  begin
+    {The installed memory manager is unchanged since the last SetMemoryManager call:  Return the extended entries as
+    they were set.}
+    AMemoryManager := LastSetMemoryManagerEx;
+  end
+  else
+  begin
+    {The memory manager was set through System.SetMemoryManager (or is the default memory manager), so the extended
+    entries are not available.}
+    AMemoryManager.GetMem := LLegacyMemoryManager.GetMem;
+    AMemoryManager.FreeMem := LLegacyMemoryManager.FreeMem;
+    AMemoryManager.ReallocMem := LLegacyMemoryManager.ReallocMem;
+    AMemoryManager.AllocMem := nil;
+    AMemoryManager.RegisterExpectedMemoryLeak := nil;
+    AMemoryManager.UnregisterExpectedMemoryLeak := nil;
+  end;
+end;
+
+procedure SetMemoryManager(const AMemoryManager: TMemoryManagerEx);
+var
+  LLegacyMemoryManager: TMemoryManager;
+begin
+  LastSetMemoryManagerEx := AMemoryManager;
+  LLegacyMemoryManager.GetMem := AMemoryManager.GetMem;
+  LLegacyMemoryManager.FreeMem := AMemoryManager.FreeMem;
+  LLegacyMemoryManager.ReallocMem := AMemoryManager.ReallocMem;
+  System.SetMemoryManager(LLegacyMemoryManager);
+end;
+{$ifend}
 
 {$ifdef X86ASM}
 {The System.TestSSE variable is not available in older Delphi versions, so the CPU feature detection is done here.
@@ -1238,7 +1335,14 @@ const
   {The size of the memory block reserved for maintaining the list of registered memory leaks.}
   CExpectedMemoryLeaksListSize = 64 * 1024;
 
-  CHexDigits: array[0..15] of Char = '0123456789ABCDEF';
+  CHexDigits: array[0..15] of WideChar = ('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F');
+
+{$if CompilerVersion < 20}
+  {Older compilers fail with an overflow error when constant folding the 64-bit debug fill pattern expressions.  A
+  typed constant is not a compile time constant, so the multiplication is instead performed at runtime (with an
+  identical result, since overflow checking is off).}
+  CQWordFillPatternMultiplier: UInt64 = $0101010101010101;
+{$ifend}
 
   {The maximum size of hexadecimal and ASCII dumps.}
   CMemoryDumpMaxBytes = 256;
@@ -1602,17 +1706,44 @@ type
 
   {When a debug block is freed the header is set to point to this class in order to catch virtual method calls on a
   freed object.}
+
+const
+  {The intercepted method names, passed to VirtualMethodOnFreedObject.  Typed constants are used because string
+  literals cannot be typecast to PWideChar under older compilers (pre Delphi 2009).}
+  CVMName_Equals: PWideChar = 'Equals';
+  CVMName_GetHashCode: PWideChar = 'GetHashCode';
+  CVMName_ToString: PWideChar = 'ToString';
+  CVMName_SafeCallException: PWideChar = 'SafeCallException';
+  CVMName_AfterConstruction: PWideChar = 'AfterConstruction';
+  CVMName_BeforeDestruction: PWideChar = 'BeforeDestruction';
+  CVMName_Dispatch: PWideChar = 'Dispatch';
+  CVMName_DefaultHandler: PWideChar = 'DefaultHandler';
+  CVMName_FreeInstance: PWideChar = 'FreeInstance';
+  CVMName_Destroy: PWideChar = 'Destroy';
+
+{$IF CompilerVersion < 18}
+var
+  {Compilers without class variable support (pre Delphi 2006) use a unit scope variable instead.  (Semantically
+  identical:  A class variable is also just a single static instance.)}
+  FVirtualMethodStackTrace: TFastMM_MaximumLengthStackTrace;
+{$IFEND}
+
+type
   TFastMM_FreedObject = class(TObject)
   protected
+{$IF CompilerVersion >= 18}
     class var FVirtualMethodStackTrace: TFastMM_MaximumLengthStackTrace;
+{$IFEND}
     procedure VirtualMethodOnFreedObject_LogEvent(APMethodName: PWideChar);
     procedure VirtualMethodOnFreedObject(APMethodName: PWideChar); overload;
     procedure VirtualMethodOnFreedObject(AIndex: Byte); overload;
   public
     {Virtual method calls that will redirect to VirtualMethodOnFreedObject}
+{$IF CompilerVersion >= 20} {TObject.Equals/GetHashCode/ToString were introduced in Delphi 2009.}
     function Equals(Obj: TObject): Boolean; override;
     function GetHashCode: Integer; override;
     function ToString: string; override;
+{$IFEND}
     function SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult; override;
     procedure AfterConstruction; override;
     procedure BeforeDestruction; override;
@@ -1652,7 +1783,7 @@ type
 
   {A simple lock mechanism that will spin in the Lock call until it is able to acquire the lock.  Not intended for use
   in performance critical code.}
-  TSimpleLock = record
+  TSimpleLock = {$IFDEF UNICODE}record{$ELSE}object{$ENDIF}
   private
     FLock: Integer;
   public
@@ -2871,7 +3002,11 @@ begin
   begin
     {VirtualQuery fails for addresses above the highest memory address accessible to the process. (Experimentally
     determined as addresses >= $ffff0000 under 32-bit, and addresses >= $7fffffff0000 under 64-bit.)}
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+    FillChar(AMemoryRegionInfo, SizeOf(TMemoryRegionInfo), 0);
+{$else}
     AMemoryRegionInfo := Default(TMemoryRegionInfo);
+{$ifend}
   end;
 end;
 
@@ -3032,7 +3167,7 @@ end;
 
 procedure OS_OutputDebugString(APDebugMessage: PWideChar); {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
-  OutputDebugString(APDebugMessage);
+  OutputDebugStringW(APDebugMessage);
 end;
 
 procedure OS_DebugBreak; {$IF CompilerVersion >= 18}inline;{$IFEND}
@@ -3102,7 +3237,7 @@ begin
       else
       begin
         {The second character is not single byte}
-        Result[0] := Byte(LCode);
+        Result^ := Byte(LCode);
         Inc(Result);
         Inc(LPIn);
       end;
@@ -3112,8 +3247,8 @@ begin
       if Word(LCode) <= $7ff then
       begin
         {Two byte encoding}
-        Result[0] := Byte(LCode shr 6) or $c0;
-        Result[1] := Byte(LCode and $3f) or $80;
+        Result^ := Byte(LCode shr 6) or $c0;
+        PByte(PAnsiChar(Result) + 1)^ := Byte(LCode and $3f) or $80;
         Inc(Result, 2);
         Inc(LPIn);
       end
@@ -3122,9 +3257,9 @@ begin
         if (LCode and $fc00fc00) <> $dc00d800 then
         begin
           {Three byte encoding}
-          Result[0] := Byte((LCode shr 12) and $0f) or $e0;
-          Result[1] := Byte((LCode shr 6) and $3f) or $80;
-          Result[2] := Byte(LCode and $3f) or $80;
+          Result^ := Byte((LCode shr 12) and $0f) or $e0;
+          PByte(PAnsiChar(Result) + 1)^ := Byte((LCode shr 6) and $3f) or $80;
+          PByte(PAnsiChar(Result) + 2)^ := Byte(LCode and $3f) or $80;
           Inc(Result, 3);
           Inc(LPIn);
         end
@@ -3133,10 +3268,10 @@ begin
           {It is a surrogate pair (4 byte) encoding:  Surrogate pairs are encoded in four bytes, with the high word
           first}
           LCode := ((LCode and $3ff) shl 10) + ((LCode shr 16) and $3ff) + $10000;
-          Result[0] := Byte((LCode shr 18) and $07) or $f0;
-          Result[1] := Byte((LCode shr 12) and $3f) or $80;
-          Result[2] := Byte((LCode shr 6) and $3f) or $80;
-          Result[3] := Byte(LCode and $3f) or $80;
+          Result^ := Byte((LCode shr 18) and $07) or $f0;
+          PByte(PAnsiChar(Result) + 1)^ := Byte((LCode shr 12) and $3f) or $80;
+          PByte(PAnsiChar(Result) + 2)^ := Byte((LCode shr 6) and $3f) or $80;
+          PByte(PAnsiChar(Result) + 3)^ := Byte(LCode and $3f) or $80;
           Inc(Result, 4);
           Inc(LPIn, 2);
         end;
@@ -3786,7 +3921,7 @@ begin
   begin
     LByteVal := APBlock^;
     if (LByteVal > Ord(' ')) and (LByteVal < 128) then
-      LPTarget^ := Char(LByteVal)
+      LPTarget^ := WideChar(LByteVal)
     else
       LPTarget^ := '.';
     Inc(LPTarget);
@@ -4262,57 +4397,63 @@ Destroy) will be caught.}
 
 procedure TFastMM_FreedObject.AfterConstruction;
 begin
-  VirtualMethodOnFreedObject('AfterConstruction');
+  VirtualMethodOnFreedObject(CVMName_AfterConstruction);
 end;
 
 procedure TFastMM_FreedObject.BeforeDestruction;
 begin
-  VirtualMethodOnFreedObject('BeforeDestruction');
+  VirtualMethodOnFreedObject(CVMName_BeforeDestruction);
 end;
 
 procedure TFastMM_FreedObject.DefaultHandler(var Message);
 begin
-  VirtualMethodOnFreedObject('DefaultHandler');
+  VirtualMethodOnFreedObject(CVMName_DefaultHandler);
 end;
 
 destructor TFastMM_FreedObject.Destroy;
 begin
-  VirtualMethodOnFreedObject('Destroy');
+  VirtualMethodOnFreedObject(CVMName_Destroy);
 end;
 
 procedure TFastMM_FreedObject.Dispatch(var Message);
 begin
-  VirtualMethodOnFreedObject('Dispatch');
+  VirtualMethodOnFreedObject(CVMName_Dispatch);
 end;
 
+{$IF CompilerVersion >= 20}
 function TFastMM_FreedObject.Equals(Obj: TObject): Boolean;
 begin
-  VirtualMethodOnFreedObject('Equals');
+  VirtualMethodOnFreedObject(CVMName_Equals);
   Result := False; //Suppress compiler warning
 end;
+{$IFEND}
 
 procedure TFastMM_FreedObject.FreeInstance;
 begin
-  VirtualMethodOnFreedObject('FreeInstance');
+  VirtualMethodOnFreedObject(CVMName_FreeInstance);
 end;
 
+{$IF CompilerVersion >= 20}
 function TFastMM_FreedObject.GetHashCode: Integer;
 begin
-  VirtualMethodOnFreedObject('GetHashCode');
+  VirtualMethodOnFreedObject(CVMName_GetHashCode);
   Result := 0; //Suppress compiler warning
 end;
+{$IFEND}
 
 function TFastMM_FreedObject.SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult;
 begin
-  VirtualMethodOnFreedObject('SafeCallException');
+  VirtualMethodOnFreedObject(CVMName_SafeCallException);
   Result := 0; //Suppress compiler warning
 end;
 
+{$IF CompilerVersion >= 20}
 function TFastMM_FreedObject.ToString: string;
 begin
-  VirtualMethodOnFreedObject('ToString');
+  VirtualMethodOnFreedObject(CVMName_ToString);
   Result := ''; //Suppress compiler warning
 end;
+{$IFEND}
 
 procedure TFastMM_FreedObject.VirtualMethodOnFreedObject(APMethodName: PWideChar);
 begin
@@ -4338,7 +4479,11 @@ var
   LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+  FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
   LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
 
   LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
   LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
@@ -4346,7 +4491,7 @@ begin
   LPBufferPos := AddTokenValue(LTokenValues, CEventLogTokenVirtualMethodName, APMethodName,
     GetStringLength(APMethodName), LPBufferPos, LPBufferEnd);
   AddTokenValue_StackTrace(LTokenValues, CEventLogTokenVirtualMethodCallOnFreedObject,
-    @TFastMM_FreedObject.FVirtualMethodStackTrace, Length(FVirtualMethodStackTrace), LPBufferPos, LPBufferEnd);
+    @FVirtualMethodStackTrace, Length(FVirtualMethodStackTrace), LPBufferPos, LPBufferEnd);
 
   LogEvent(mmetVirtualMethodCallOnFreedObject, LTokenValues);
 
@@ -4489,7 +4634,11 @@ var
   LTokenValueBuffer: array[0..CTokenBufferMaxWideChars] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+  FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
   LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
 
   LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
   LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
@@ -4505,7 +4654,11 @@ var
   LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+  FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
   LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
 
   LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
   LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
@@ -4556,19 +4709,19 @@ begin
   if LByteOffset and 1 <> 0 then
   begin
     Dec(LByteOffset);
-    LPUserArea[LByteOffset] := CDebugFillByteFreedBlock;
+    PByte(PAnsiChar(LPUserArea) + LByteOffset)^ := CDebugFillByteFreedBlock;
   end;
 
   if LByteOffset and 2 <> 0 then
   begin
     Dec(LByteOffset, 2);
-    PWord(@LPUserArea[LByteOffset])^ := Word($0101) * CDebugFillByteFreedBlock;
+    PWord(PAnsiChar(LPUserArea) + LByteOffset)^ := Word($0101) * CDebugFillByteFreedBlock;
   end;
 
   if LByteOffset and 4 <> 0 then
   begin
     Dec(LByteOffset, 4);
-    PCardinal(@LPUserArea[LByteOffset])^ := Cardinal($01010101) * CDebugFillByteFreedBlock;
+    PCardinal(PAnsiChar(LPUserArea) + LByteOffset)^ := Cardinal($01010101) * CDebugFillByteFreedBlock;
   end;
 
   {Loop over the remaining 8 byte chunks using a negative offset.}
@@ -4576,7 +4729,7 @@ begin
   LByteOffset := - LByteOffset;
   while LByteOffset < 0 do
   begin
-    PUInt64(@LPUserArea[LByteOffset])^ := UInt64($0101010101010101) * CDebugFillByteFreedBlock;
+    PUInt64(PAnsiChar(LPUserArea) + LByteOffset)^ := {$if CompilerVersion < 20}CQWordFillPatternMultiplier{$else}UInt64($0101010101010101){$ifend} * CDebugFillByteFreedBlock;
     Inc(LByteOffset, 8);
   end;
 end;
@@ -4592,19 +4745,19 @@ begin
   if LByteOffset and 1 <> 0 then
   begin
     Dec(LByteOffset);
-    LPUserArea[LByteOffset] := CDebugFillByteAllocatedBlock;
+    PByte(PAnsiChar(LPUserArea) + LByteOffset)^ := CDebugFillByteAllocatedBlock;
   end;
 
   if LByteOffset and 2 <> 0 then
   begin
     Dec(LByteOffset, 2);
-    PWord(@LPUserArea[LByteOffset])^ := Word($0101) * CDebugFillByteAllocatedBlock;
+    PWord(PAnsiChar(LPUserArea) + LByteOffset)^ := Word($0101) * CDebugFillByteAllocatedBlock;
   end;
 
   if LByteOffset and 4 <> 0 then
   begin
     Dec(LByteOffset, 4);
-    PCardinal(@LPUserArea[LByteOffset])^ := Cardinal($01010101) * CDebugFillByteAllocatedBlock;
+    PCardinal(PAnsiChar(LPUserArea) + LByteOffset)^ := Cardinal($01010101) * CDebugFillByteAllocatedBlock;
   end;
 
   {Loop over the remaining 8 byte chunks using a negative offset.}
@@ -4612,7 +4765,7 @@ begin
   LByteOffset := - LByteOffset;
   while LByteOffset < 0 do
   begin
-    PUInt64(@LPUserArea[LByteOffset])^ := UInt64($0101010101010101) * CDebugFillByteAllocatedBlock;
+    PUInt64(PAnsiChar(LPUserArea) + LByteOffset)^ := {$if CompilerVersion < 20}CQWordFillPatternMultiplier{$else}UInt64($0101010101010101){$ifend} * CDebugFillByteAllocatedBlock;
     Inc(LByteOffset, 8);
   end;
 end;
@@ -4633,11 +4786,15 @@ var
 begin
   {If the block is large enough to be an object then the first pointer in the block would have been set to point to the
   TFastMM_FreedObject class.}
-  LExpectedFillPatternFirst8Bytes := UInt64($0101010101010101) * CDebugFillByteFreedBlock;
+  LExpectedFillPatternFirst8Bytes := {$if CompilerVersion < 20}CQWordFillPatternMultiplier{$else}UInt64($0101010101010101){$ifend} * CDebugFillByteFreedBlock;
   if APDebugBlockHeader.UserSize >= CTObjectInstanceSize then
     PPointer(@LExpectedFillPatternFirst8Bytes)^ := TFastMM_FreedObject;
 
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+  FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
   LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
   LPBufferPos := @LTokenValueBuffer;
   LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
 
@@ -4653,7 +4810,7 @@ begin
     else
       LExpectedFillPatternByte := CDebugFillByteFreedBlock;
 
-    if LPUserArea[LOffset] <> LExpectedFillPatternByte then
+    if PByte(PAnsiChar(LPUserArea) + LOffset)^ <> LExpectedFillPatternByte then
     begin
 
       {Found the start of a changed block, now find the length}
@@ -4670,7 +4827,7 @@ begin
         else
           LExpectedFillPatternByte := CDebugFillByteFreedBlock;
 
-        if LPUserArea[LOffset] = LExpectedFillPatternByte then
+        if PByte(PAnsiChar(LPUserArea) + LOffset)^ = LExpectedFillPatternByte then
           Break;
       end;
 
@@ -4732,21 +4889,21 @@ begin
   if LByteOffset and 1 <> 0 then
   begin
     Dec(LByteOffset);
-    if LPUserArea[LByteOffset] <> CDebugFillByteFreedBlock then
+    if PByte(PAnsiChar(LPUserArea) + LByteOffset)^ <> CDebugFillByteFreedBlock then
       LFillPatternIntact := False;
   end;
 
   if LByteOffset and 2 <> 0 then
   begin
     Dec(LByteOffset, 2);
-    if PWord(@LPUserArea[LByteOffset])^ <> Word($0101) * CDebugFillByteFreedBlock then
+    if PWord(PAnsiChar(LPUserArea) + LByteOffset)^ <> Word($0101) * CDebugFillByteFreedBlock then
       LFillPatternIntact := False;
   end;
 
   if LByteOffset and 4 <> 0 then
   begin
     Dec(LByteOffset, 4);
-    if PCardinal(@LPUserArea[LByteOffset])^ <> Cardinal($01010101) * CDebugFillByteFreedBlock then
+    if PCardinal(PAnsiChar(LPUserArea) + LByteOffset)^ <> Cardinal($01010101) * CDebugFillByteFreedBlock then
       LFillPatternIntact := False;
   end;
 
@@ -4755,7 +4912,7 @@ begin
   LByteOffset := - LByteOffset;
   while LByteOffset < 0 do
   begin
-    if PUInt64(@LPUserArea[LByteOffset])^ <> UInt64($0101010101010101) * CDebugFillByteFreedBlock then
+    if PUInt64(PAnsiChar(LPUserArea) + LByteOffset)^ <> {$if CompilerVersion < 20}CQWordFillPatternMultiplier{$else}UInt64($0101010101010101){$ifend} * CDebugFillByteFreedBlock then
     begin
       LFillPatternIntact := False;
       Break;
@@ -4964,7 +5121,11 @@ begin
     Exit;
     end; 
 
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+  FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
   LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
 
   LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
   LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
@@ -9285,7 +9446,11 @@ end;
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal): THeapStatus;
 begin
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+  FillChar(Result, SizeOf(THeapStatus), 0);
+{$else}
   Result := Default(THeapStatus);
+{$ifend}
 
   FastMM_WalkBlocks(FastMM_GetHeapStatus_CallBack,
     [btLargeBlock, btMediumBlockSpan, btMediumBlock, btSmallBlockSpan, btSmallBlock], False, @Result,
@@ -9369,7 +9534,11 @@ var
   i, j: Integer;
   LCurrentSmallBlockType: TSmallBlockTypeState;
 begin
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+  FillChar(AMemoryManagerState, SizeOf(TFastMM_MemoryManagerState), 0);
+{$else}
   AMemoryManagerState := Default(TFastMM_MemoryManagerState);
+{$ifend}
   AMemoryManagerState.SmallBlockTypeCount := CSmallBlockTypeCount;
 
   for i := 0 to CSmallBlockTypeCount - 1 do
@@ -9831,7 +10000,11 @@ begin
       LPBufferEnd := Pointer(PAnsiChar(LPLogInfo) + (LBufferSize));
 
       {Add the header with the usage summary.}
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+      FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
       LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
       LPTokenPos := AddTokenValues_GeneralTokens(LTokenValues, LPTokenBufferStart, LPStateLogBufferStart);
       LPTokenPos := AddTokenValue_NativeUInt(LTokenValues, CStateLogTokenAllocatedKB,
         LMemoryManagerUsageSummary.AllocatedBytes div 1024, LPTokenPos, LPStateLogBufferStart);
@@ -9843,7 +10016,11 @@ begin
         LPBufferEnd);
 
       {Add the usage information for each class}
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+      FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
       LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
       for LInd := 0 to LPLogInfo.NodeCount - 1 do
       begin
         LPNode := @LPLogInfo.Nodes[LInd];
@@ -9970,7 +10147,11 @@ begin
       begin
         {Memory has already been allocated using this memory manager.  We cannot rip the memory manager out from under
         live pointers.}
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+        FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
         LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
         AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, @LTokenValueBuffer[High(LTokenValueBuffer)]);
         LogEvent(mmetCannotSwitchToSharedMemoryManagerWithLivePointers, LTokenValues);
 
@@ -10398,7 +10579,11 @@ begin
   {If individual leaks must be reported, report the leak now.}
   if mmetUnexpectedMemoryLeakDetail in (FastMM_OutputDebugStringEvents + FastMM_LogToFileEvents + FastMM_MessageBoxEvents) then
   begin
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+    FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
     LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
 
     LPBufferEnd := @LTokenValueBuffer[High(LTokenValueBuffer)];
     LPBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, LPBufferEnd);
@@ -10492,7 +10677,11 @@ begin
   end;
 
   {Build the token dictionary for the leak summary.}
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+  FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
   LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
   LPTokenBufferPos := AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer,
     @LTokenValueBuffer[High(LTokenValueBuffer)]);
   AddTokenValue(LTokenValues, CEventLogTokenLeakSummaryEntries, @LLeakEntriesText,
@@ -11074,7 +11263,11 @@ begin
   been allocated through the default memory manager.}
   if CurrentInstallationState <> mmisDefaultMemoryManagerInUse then
   begin
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+    FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
     LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
     AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, @LTokenValueBuffer[High(LTokenValueBuffer)]);
     LogEvent(mmetAnotherThirdPartyMemoryManagerAlreadyInstalled, LTokenValues);
 
@@ -11083,7 +11276,11 @@ begin
 
   if System.GetHeapStatus.TotalAllocated <> 0 then
   begin
+{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+    FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
+{$else}
     LTokenValues := Default(TEventLogTokenValues);
+{$ifend}
     AddTokenValues_GeneralTokens(LTokenValues, @LTokenValueBuffer, @LTokenValueBuffer[High(LTokenValueBuffer)]);
     LogEvent(mmetCannotInstallAfterDefaultMemoryManagerHasBeenUsed, LTokenValues);
 
@@ -11122,7 +11319,7 @@ begin
     Exit;
     end; 
 
-  DebugSupportLibraryHandle := LoadLibrary(FastMM_DebugSupportLibraryName);
+  DebugSupportLibraryHandle := LoadLibraryW(FastMM_DebugSupportLibraryName);
   if DebugSupportLibraryHandle <> 0 then
   begin
     DebugLibrary_GetRawStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
