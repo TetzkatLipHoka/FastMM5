@@ -1154,9 +1154,17 @@ begin
   Result := APointer;
 end;
 
+{Implemented after the block header constants below.  True if the block header does not match any FastMM block header
+pattern, i.e. the block was allocated by the memory manager that was active before FastMM installed.}
+function BlockLooksForeign(APointer: Pointer): Boolean; forward;
+
 function FPCMemSizeWrapper(APointer: Pointer): ptruint;
 begin
-  Result := ptruint(FastMM_BlockMaximumUserBytes(APointer));
+  {Blocks allocated by the FPC RTL before FastMM installed must be measured by their owning memory manager.}
+  if FPCPreviousMemoryManagerValid and BlockLooksForeign(APointer) then
+    Result := FPCPreviousMemoryManager.MemSize(APointer)
+  else
+    Result := ptruint(FastMM_BlockMaximumUserBytes(APointer));
 end;
 
 procedure GetMemoryManager(var AMemoryManager: TMemoryManagerEx);
@@ -7396,6 +7404,61 @@ begin
     - (CDropSmallBlockFlagsMask and PBlockStatusFlags(PAnsiChar(APSmallBlock) - SizeOf(TBlockStatusFlags))^) shl CSmallBlockSpanOffsetBitShift);
 end;
 
+{$ifdef FPC}
+{Returns True if the block cannot have been allocated by this memory manager.  Under FPC the RTL allocates a number of
+blocks during startup, before this unit's initialization has a chance to install FastMM;  when such a block is later
+freed, reallocated or measured it must be forwarded to the previously installed memory manager
+(FPCPreviousMemoryManager).  The word preceding a foreign block is the high word of the FPC heap chunk header, which
+regularly collides with FastMM's header flag patterns (e.g. a pointer-valued chunk field yields 4 or 6 = "small
+block"), so matching the flag pattern alone is NOT sufficient.  Ownership is therefore verified structurally:  the
+manager pointer reached through the block's header must point into this unit's own manager arrays (small/medium/
+large), or for debug blocks the debug header checksum must be valid.  The reads performed here are the same reads the
+regular free/realloc paths would perform, and the word before the block is always readable because the FPC RTL heap
+places a chunk header before every block.}
+function BlockLooksForeign(APointer: Pointer): Boolean;
+var
+  LBlockHeader: Integer;
+  LPSmallBlockManager: PSmallBlockManager;
+  LPMediumBlockManager: PMediumBlockManager;
+  LPLargeBlockManager: PLargeBlockManager;
+  LPDebugBlockHeader: PFastMM_DebugBlockHeader;
+begin
+  LBlockHeader := PBlockStatusFlags(PAnsiChar(APointer) - SizeOf(TBlockStatusFlags))^;
+
+  if LBlockHeader and CIsSmallBlockFlag <> 0 then
+  begin
+    {Claims to be a small block:  the span derived from the header must point back into the small block manager array.}
+    LPSmallBlockManager := GetSpanForSmallBlock(APointer).SmallBlockManager;
+    Result := (NativeUInt(LPSmallBlockManager) < NativeUInt(@SmallBlockManagers))
+      or (NativeUInt(LPSmallBlockManager) >= NativeUInt(@SmallBlockManagers) + SizeOf(SmallBlockManagers));
+  end
+  else if LBlockHeader and (not (CBlockIsFreeFlag or CHasDebugInfoFlag)) = CIsMediumBlockFlag then
+  begin
+    {Claims to be a medium block:  the span derived from the header must point back into the medium block manager
+    array.}
+    LPMediumBlockManager := GetMediumBlockSpan(APointer).MediumBlockManager;
+    Result := (NativeUInt(LPMediumBlockManager) < NativeUInt(@MediumBlockManagers))
+      or (NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers) + SizeOf(MediumBlockManagers));
+  end
+  else if LBlockHeader and (not (CBlockIsFreeFlag or CHasDebugInfoFlag)) = CIsLargeBlockFlag then
+  begin
+    {Claims to be a large block:  the large block header must point back into the large block manager array.}
+    LPLargeBlockManager := PLargeBlockHeader(PAnsiChar(APointer) - CLargeBlockHeaderSize).LargeBlockManager;
+    Result := (NativeUInt(LPLargeBlockManager) < NativeUInt(@LargeBlockManagers))
+      or (NativeUInt(LPLargeBlockManager) >= NativeUInt(@LargeBlockManagers) + SizeOf(LargeBlockManagers));
+  end
+  else if LBlockHeader and (not CBlockIsFreeFlag) = CIsDebugBlockFlag then
+  begin
+    {Claims to be a debug sub-block:  the debug header carries a checksum over its fields that a foreign block will
+    not reproduce.}
+    LPDebugBlockHeader := PFastMM_DebugBlockHeader(PAnsiChar(APointer) - CDebugBlockHeaderSize);
+    Result := LPDebugBlockHeader.HeaderCheckSum <> LPDebugBlockHeader.CalculateHeaderCheckSum;
+  end
+  else
+    Result := True;
+end;
+{$endif}
+
 {Subroutine for FastMM_FreeMem_FreeSmallBlock.  The small block manager must already be locked.  Optionally unlocks the
 small block manager before exit.  Returns 0 on success.}
 function FastMM_FreeMem_FreeSmallBlock_ManagerAlreadyLocked(APSmallBlockSpan: PSmallBlockSpanHeader;
@@ -8743,6 +8806,18 @@ asm
 var
   LBlockHeader: Integer;
 begin
+{$ifdef FPC}
+  {Blocks allocated by the FPC RTL before FastMM installed are owned by the previous memory manager and must be
+  forwarded to it.  This must be checked before the dispatch below, because the FPC heap chunk header preceding a
+  foreign block regularly collides with FastMM's header flag patterns.}
+  if FPCPreviousMemoryManagerValid and BlockLooksForeign(APointer) then
+  begin
+    FPCPreviousMemoryManager.FreeMem(APointer);
+    Result := 0;
+    Exit;
+  end;
+{$endif}
+
   {Read the flags from the block header.}
   LBlockHeader := PBlockStatusFlags(PAnsiChar(APointer) - SizeOf(TBlockStatusFlags))^;
 
@@ -8788,7 +8863,13 @@ begin
   bad situation worse).}
   LBlockHeader := PBlockStatusFlags(PAnsiChar(APointer) - SizeOf(TBlockStatusFlags))^;
   if (LBlockHeader <> CIsDebugBlockFlag)
-    and ((LBlockHeader and CBlockIsFreeFlag) = 0) then
+    and ((LBlockHeader and CBlockIsFreeFlag) = 0)
+{$ifdef FPC}
+    {Foreign blocks (allocated by the FPC RTL before FastMM installed) must not be filled:  their size cannot be
+    determined from a FastMM block header.  FastMM_FreeMem forwards them to the previous memory manager.}
+    and not (FPCPreviousMemoryManagerValid and BlockLooksForeign(APointer))
+{$endif}
+  then
   begin
     FillChar(APointer^, FastMM_BlockMaximumUserBytes(APointer), CDebugFillByteFreedBlock);
   end;
@@ -8852,6 +8933,19 @@ asm
 var
   LBlockHeader: Integer;
 begin
+{$ifdef FPC}
+  {Blocks allocated by the FPC RTL before FastMM installed are owned by the previous memory manager and must be
+  forwarded to it.  This must be checked before the dispatch below, because the FPC heap chunk header preceding a
+  foreign block regularly collides with FastMM's header flag patterns.  The reallocated block stays under the previous
+  manager's ownership and will be forwarded again on subsequent calls.}
+  if FPCPreviousMemoryManagerValid and BlockLooksForeign(APointer) then
+  begin
+    Result := APointer;
+    FPCPreviousMemoryManager.ReAllocMem(Result, ptruint(ANewSize));
+    Exit;
+  end;
+{$endif}
+
   {Read the flags from the block header.}
   LBlockHeader := PBlockStatusFlags(PAnsiChar(APointer) - SizeOf(TBlockStatusFlags))^;
 
@@ -11557,11 +11651,10 @@ begin
     Exit;
   end;
 
-  {PROVISIONAL for the FPC port:  FPC's RTL allocates a handful of blocks during startup, before this unit's
-  initialization can run, so TotalAllocated is never 0 under FPC.  Skipping this guard lets FastMM install and manage
-  all subsequent allocations, but blocks allocated before installation are NOT owned by FastMM;  freeing them through
-  FastMM would misbehave.  A production FPC port needs FreeMem/ReallocMem to detect foreign pointers and forward them
-  to the previously installed memory manager - see FPCPreviousMemoryManager.  TODO(fpc): foreign-block forwarding.}
+  {FPC:  The RTL allocates a number of blocks during startup, before this unit's initialization can run, so
+  TotalAllocated is never 0 under FPC and this guard must be skipped.  Blocks allocated before installation are not
+  owned by FastMM;  FreeMem/ReallocMem/MemSize detect them via BlockLooksForeign and forward them to the previously
+  installed memory manager (FPCPreviousMemoryManager).}
   {$ifndef FPC}
   if System.GetHeapStatus.TotalAllocated <> 0 then
   begin
