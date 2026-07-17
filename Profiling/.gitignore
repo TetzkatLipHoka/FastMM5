@@ -1,0 +1,13 @@
+# Build output directories used by the demo compile commands
+bin7/
+bin10/
+bin13/
+
+# Demo/test run output
+*.csv
+*_MemoryManager_EventLog.txt
+
+# Delphi per-project build artifacts
+*.dof
+*.local
+*.identcache
