@@ -8057,7 +8057,7 @@ begin
         {Try to get a block from the first partially free span.}
         if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
           begin
-          result := FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager)
+          result := FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager);
           Exit;
           end;
 
