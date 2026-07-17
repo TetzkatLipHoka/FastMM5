@@ -144,6 +144,23 @@ Supported Platforms:
 
 unit FastMM5;
 
+{$ifdef FPC}
+(*Free Pascal support (Windows target).  FPC does not predefine Delphi's CompilerVersion / RTLVersion constants that the
+version switches below rely on, so they are supplied here as macros (FPC evaluates the IF CompilerVersion switches
+correctly against a macro).  CompilerVersion 22 selects the wanted behaviour throughout:  no unit scope names and an
+explicit CPUX86 define, no Delphi-2009 NativeInt/PUInt64/OldStringHeader shims, and inline enabled.  Assembler is
+disabled for the initial bring-up via PurePascal - all block-management BASM has Pascal fallbacks, and only the atomics
+carry an explicit FPC branch.  The hand-tuned asm paths can be re-enabled later.*)
+  {$mode delphi}
+  {$asmmode intel}
+  {$macro on}
+  {$define CompilerVersion:=22}
+  {$define RTLVersion:=22.00}
+  {$define PurePascal}
+  {The resource/memory-loaded debug DLL support is Windows-PE specific and out of scope for the initial FPC port.}
+  {$define FastMM_FPC_NoMemoryLoadLibrary}
+{$endif}
+
 {Compatibility defines for compilers older than Delphi XE3.  The XE3+ code paths are not affected by these.}
 {$if CompilerVersion < 23} {Delphi 2009/2010/XE: no unit scope names, and the CPUX86 conditional is not predefined.}
   {$define FastMM_NoUnitScopeNames}
@@ -173,6 +190,13 @@ type
   PUInt64 = ^UInt64;
 {$ifend}
 
+{$ifdef FPC}
+type
+  {FPC has NativeInt/NativeUInt/PNativeInt/PNativeUInt/PUInt64, but not the Delphi RTL Int64-array helper types.}
+  TInt64Array = array[0..MaxInt div SizeOf(Int64) - 1] of Int64;
+  PInt64Array = ^TInt64Array;
+{$endif}
+
 {$RangeChecks Off}
 {$BoolEval Off}
 {$OverflowChecks Off}
@@ -200,6 +224,7 @@ type
 {$endif}
 
 {$DEFINE MemoryLoadLibrarySupport}
+{$ifdef FastMM_FPC_NoMemoryLoadLibrary}{$UNDEF MemoryLoadLibrarySupport}{$endif}
 {.$DEFINE IncludeResource}
 {.$DEFINE IncludeResource_madExcept}
 
@@ -530,10 +555,10 @@ type
     EfficiencyPercentage: Double;
   end;
 
-{$IF CompilerVersion < 18}
+{$if (CompilerVersion < 18) or Defined(FPC)}
   {Compatibility types for compilers released before the FastMM4-based memory manager was integrated into the RTL
-  (i.e. before Delphi 2006):  Under later compilers these are declared in the System unit.  The declarations below
-  are identical to the System unit versions.}
+  (i.e. before Delphi 2006), and for FPC:  under later Delphi compilers these are declared in the System unit.  The
+  declarations below are identical to the System unit versions.}
   TSmallBlockTypeState = packed record
     {The internal size of the block type}
     InternalBlockSize: Cardinal;
@@ -3017,6 +3042,11 @@ begin
   end;
 end;
 
+{$ifdef FPC}
+{FPC 3.2.2's Windows unit does not export SwitchToThread.}
+function SwitchToThread: BOOL; stdcall; external 'kernel32' name 'SwitchToThread';
+{$endif}
+
 {If another thread is ready to run on the current CPU, give it a chance to execute.  This is typically called if the
 current thread is unable to make any progress, because it is waiting for locked resources.}
 procedure OS_AllowOtherThreadToRun; {$IF CompilerVersion >= 18}inline;{$IFEND}
@@ -4885,7 +4915,7 @@ begin
   {If the block is large enough the first 4/8 bytes should be a pointer to the freed object class.}
   if LByteOffset >= CTObjectInstanceSize then
   begin
-    LFillPatternIntact := (PPointer(LPUserArea)^ = TFastMM_FreedObject)
+    LFillPatternIntact := (PPointer(LPUserArea)^ = Pointer(TFastMM_FreedObject))
     {$ifdef 32Bit}
       and (PIntegerArray(LPUserArea)[1] = Integer(Cardinal($01010101) * CDebugFillByteFreedBlock));
     {$endif};
@@ -8057,7 +8087,7 @@ begin
         {Try to get a block from the first partially free span.}
         if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
           begin
-          result := FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager)
+          result := FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager);
           Exit;
           end;
 
@@ -9703,7 +9733,7 @@ begin
       if LMemoryRegionInfo.RegionSize = 0 then
       begin
         {VirtualQuery may fail for addresses >2GB if a large address space is not enabled.}
-        FillChar(AMemoryMap[LChunkIndex], 65536 - LChunkIndex, csSysReserved);
+        FillChar(AMemoryMap[LChunkIndex], 65536 - LChunkIndex, Byte(csSysReserved));
         Break;
       end;
 
@@ -9714,8 +9744,8 @@ begin
 
       {Set the status of all the chunks in the region}
       case LMemoryRegionInfo.RegionState of
-        mrsAllocated: FillChar(AMemoryMap[LChunkIndex], LNextChunkIndex - LChunkIndex, csSysAllocated);
-        mrsReserved: FillChar(AMemoryMap[LChunkIndex], LNextChunkIndex - LChunkIndex, csSysReserved);
+        mrsAllocated: FillChar(AMemoryMap[LChunkIndex], LNextChunkIndex - LChunkIndex, Byte(csSysAllocated));
+        mrsReserved: FillChar(AMemoryMap[LChunkIndex], LNextChunkIndex - LChunkIndex, Byte(csSysReserved));
       end;
 
       {Point to the start of the next chunk}
