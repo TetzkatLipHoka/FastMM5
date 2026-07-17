@@ -484,6 +484,8 @@ var
   FPCDIAG_LastBlockSize: Integer;
   FPCDIAG_LastSpan: Pointer;
   FPCDIAG_LastSpanSize: Integer;
+
+procedure FPCDIAG_DumpRegionRegistry;
 {$endif}
 
 type
@@ -1171,7 +1173,12 @@ function FPCMemSizeWrapper(APointer: Pointer): ptruint;
 begin
   {Blocks allocated by the FPC RTL before FastMM installed must be measured by their owning memory manager.}
   if FPCPreviousMemoryManagerValid and BlockLooksForeign(APointer) then
-    Result := FPCPreviousMemoryManager.MemSize(APointer)
+  begin
+{$ifdef FPCDIAG}
+    Writeln('FPCDIAG MemSizeWrapper: foreign p=', NativeUInt(APointer), ' -> forwarding');
+{$endif}
+    Result := FPCPreviousMemoryManager.MemSize(APointer);
+  end
   else
     Result := ptruint(FastMM_BlockMaximumUserBytes(APointer));
 end;
@@ -3060,9 +3067,138 @@ end;
 procedure ReleaseEmergencyReserveAddressSpace; forward;
 function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; forward;
 
+{$ifdef FPC}
+{------------------------------------------------------------------------------
+Registry of the memory regions this memory manager has obtained from the OS.
+
+Under FPC the RTL allocates blocks before FastMM installs, and those foreign
+blocks must be recognized in FreeMem/ReallocMem/MemSize so they can be
+forwarded to the previous memory manager.  Matching the block header patterns
+is not reliable (the FPC heap chunk header regularly collides with them), and
+validating a candidate header by dereferencing pointers derived from it can
+touch unmapped memory for foreign blocks (this actually happens with the
+FPC 3.3.1 heap layout).  The registry provides a definitive, dereference-free
+ownership test instead:  a pointer belongs to FastMM if and only if it lies
+inside one of the OS regions recorded here.
+
+The registry is a fixed array scanned linearly.  Regions are few and large
+(medium block spans and large blocks), so the scan is short.  Entries are
+claimed with an atomic compare-and-swap and published with an atomic exchange
+after the size is stored, so readers never see a half-initialized entry.  An
+entry is cleared before the region is released back to the OS, so a stale
+entry can never cover foreign memory.  If the registry ever overflows, the
+overflow flag causes the ownership test to fail closed:  every pointer is then
+treated as a FastMM block, which restores the pre-forwarding behaviour for
+foreign blocks (an invalid-pointer error instead of a crash).
+------------------------------------------------------------------------------}
+const
+  CFPCRegionRegistryMaxEntries = 8192;
+  CFPCRegionEntryClaimed = Pointer(1);
+var
+  FPCRegionRegistry: array[0..CFPCRegionRegistryMaxEntries - 1] of record
+    Base: Pointer;  {nil = free slot, CFPCRegionEntryClaimed = being initialized}
+    Size: NativeUInt;
+  end;
+  {One past the highest slot index ever used:  readers only scan this far.}
+  FPCRegionRegistryHighWater: Integer;
+  FPCRegionRegistryOverflowed: Boolean;
+
+procedure FPCRegionRegistryAdd(ABase: Pointer; ASize: NativeInt);
+var
+  i, LOldHighWater: Integer;
+begin
+  for i := 0 to CFPCRegionRegistryMaxEntries - 1 do
+  begin
+    if (FPCRegionRegistry[i].Base = nil)
+      and (AtomicCmpExchange(FPCRegionRegistry[i].Base, CFPCRegionEntryClaimed, nil) = nil) then
+    begin
+      FPCRegionRegistry[i].Size := NativeUInt(ASize);
+      {Make sure readers scan up to and including this slot before it becomes visible.}
+      while True do
+      begin
+        LOldHighWater := FPCRegionRegistryHighWater;
+        if (LOldHighWater > i)
+          or (AtomicCmpExchange(FPCRegionRegistryHighWater, i + 1, LOldHighWater) = LOldHighWater) then
+          Break;
+      end;
+      {Publish the entry.  The atomic exchange orders the size and high water stores before the base store.}
+      AtomicExchange(FPCRegionRegistry[i].Base, ABase);
+      Exit;
+    end;
+  end;
+  FPCRegionRegistryOverflowed := True;
+end;
+
+procedure FPCRegionRegistryRemove(ABase: Pointer);
+var
+  i: Integer;
+begin
+  for i := 0 to FPCRegionRegistryHighWater - 1 do
+  begin
+    if FPCRegionRegistry[i].Base = ABase then
+    begin
+      FPCRegionRegistry[i].Base := nil;
+      Exit;
+    end;
+  end;
+end;
+
+{Returns True if the pointer lies inside a memory region owned by this memory manager.}
+function FPCPointerInFastMMRegion(APointer: Pointer): Boolean;
+var
+  i: Integer;
+  LBase: Pointer;
+begin
+  if FPCRegionRegistryOverflowed then
+  begin
+    {Fail closed:  treat everything as a FastMM block (see the comment above).}
+    Result := True;
+    Exit;
+  end;
+
+  for i := 0 to FPCRegionRegistryHighWater - 1 do
+  begin
+    LBase := FPCRegionRegistry[i].Base;
+    {The lower bound must be checked explicitly:  the usual "p - base < size" trick relies on unsigned wraparound,
+    but FPC promotes the 32-bit unsigned subtraction to Int64, making the difference negative (and thus less than
+    the size) for pointers below the region base.}
+    if (LBase <> nil) and (LBase <> CFPCRegionEntryClaimed)
+      and (NativeUInt(APointer) >= NativeUInt(LBase))
+      and (NativeUInt(APointer) - NativeUInt(LBase) < FPCRegionRegistry[i].Size) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+
+  Result := False;
+end;
+
+{$ifdef FPCDIAG}
+procedure FPCDIAG_DumpRegionRegistry;
+var
+  i: Integer;
+begin
+  Writeln('FPCDIAG region registry, high water = ', FPCRegionRegistryHighWater,
+    ', overflowed = ', FPCRegionRegistryOverflowed,
+    ', prevMMvalid = ', FPCPreviousMemoryManagerValid);
+  for i := 0 to FPCRegionRegistryHighWater - 1 do
+    if FPCRegionRegistry[i].Base <> nil then
+      Writeln('  slot ', i, ': base=', NativeUInt(FPCRegionRegistry[i].Base),
+        ' size=', FPCRegionRegistry[i].Size,
+        ' end=', NativeUInt(FPCRegionRegistry[i].Base) + FPCRegionRegistry[i].Size);
+end;
+{$endif}
+{$endif}
+
 {Releases a block of memory back to the operating system.  Returns 0 on success, -1 on failure.}
 function OS_FreeVirtualMemory(APointer: Pointer; ABlockSize: NativeInt): Integer;
 begin
+{$ifdef FPC}
+  {The registry entry must be gone before the memory is released, so a stale entry can never cover memory that the OS
+  may hand out to somebody else.}
+  FPCRegionRegistryRemove(APointer);
+{$endif}
   if VirtualFree(APointer, 0, MEM_RELEASE) then
   begin
     AtomicDecrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
@@ -3098,6 +3234,11 @@ begin
 
   if Result <> nil then
   begin
+{$ifdef FPC}
+    {Register the region before the limit check below:  the failure path frees through OS_FreeVirtualMemory, which
+    removes the entry again.}
+    FPCRegionRegistryAdd(Result, ABlockSize);
+{$endif}
     AtomicIncrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
 
     if (MemoryUsageLimit > 0)
@@ -3131,6 +3272,12 @@ begin
     Result := False;
     Exit;
   end;
+
+{$ifdef FPC}
+  {Register the region before the limit check below:  the failure path frees through OS_FreeVirtualMemory, which
+  removes the entry again.}
+  FPCRegionRegistryAdd(APAddress, ABlockSize);
+{$endif}
 
   {Update the memory usage, and check whether MemoryUsageLimit has been reached.}
   AtomicIncrement(MemoryUsageCurrent, NativeUInt(ABlockSize));
@@ -7429,54 +7576,15 @@ end;
 {Returns True if the block cannot have been allocated by this memory manager.  Under FPC the RTL allocates a number of
 blocks during startup, before this unit's initialization has a chance to install FastMM;  when such a block is later
 freed, reallocated or measured it must be forwarded to the previously installed memory manager
-(FPCPreviousMemoryManager).  The word preceding a foreign block is the high word of the FPC heap chunk header, which
-regularly collides with FastMM's header flag patterns (e.g. a pointer-valued chunk field yields 4 or 6 = "small
-block"), so matching the flag pattern alone is NOT sufficient.  Ownership is therefore verified structurally:  the
-manager pointer reached through the block's header must point into this unit's own manager arrays (small/medium/
-large), or for debug blocks the debug header checksum must be valid.  The reads performed here are the same reads the
-regular free/realloc paths would perform, and the word before the block is always readable because the FPC RTL heap
-places a chunk header before every block.}
+(FPCPreviousMemoryManager).  Ownership is decided by the OS region registry:  a pointer belongs to FastMM if and only
+if it lies inside a memory region this memory manager obtained from the OS.  No reads through the block header are
+performed at all.  (An earlier version matched and structurally validated the block header patterns, but the word
+preceding an FPC RTL block is the high word of the FPC heap chunk header, which regularly collides with FastMM's
+header patterns - e.g. a pointer-valued chunk field reads as "small block" - and chasing pointers derived from a
+colliding header can touch unmapped memory.  The latter actually happens with the FPC 3.3.1 heap layout.)}
 function BlockLooksForeign(APointer: Pointer): Boolean;
-var
-  LBlockHeader: Integer;
-  LPSmallBlockManager: PSmallBlockManager;
-  LPMediumBlockManager: PMediumBlockManager;
-  LPLargeBlockManager: PLargeBlockManager;
-  LPDebugBlockHeader: PFastMM_DebugBlockHeader;
 begin
-  LBlockHeader := PBlockStatusFlags(PAnsiChar(APointer) - SizeOf(TBlockStatusFlags))^;
-
-  if LBlockHeader and CIsSmallBlockFlag <> 0 then
-  begin
-    {Claims to be a small block:  the span derived from the header must point back into the small block manager array.}
-    LPSmallBlockManager := GetSpanForSmallBlock(APointer).SmallBlockManager;
-    Result := (NativeUInt(LPSmallBlockManager) < NativeUInt(@SmallBlockManagers))
-      or (NativeUInt(LPSmallBlockManager) >= NativeUInt(@SmallBlockManagers) + SizeOf(SmallBlockManagers));
-  end
-  else if LBlockHeader and (not (CBlockIsFreeFlag or CHasDebugInfoFlag)) = CIsMediumBlockFlag then
-  begin
-    {Claims to be a medium block:  the span derived from the header must point back into the medium block manager
-    array.}
-    LPMediumBlockManager := GetMediumBlockSpan(APointer).MediumBlockManager;
-    Result := (NativeUInt(LPMediumBlockManager) < NativeUInt(@MediumBlockManagers))
-      or (NativeUInt(LPMediumBlockManager) >= NativeUInt(@MediumBlockManagers) + SizeOf(MediumBlockManagers));
-  end
-  else if LBlockHeader and (not (CBlockIsFreeFlag or CHasDebugInfoFlag)) = CIsLargeBlockFlag then
-  begin
-    {Claims to be a large block:  the large block header must point back into the large block manager array.}
-    LPLargeBlockManager := PLargeBlockHeader(PAnsiChar(APointer) - CLargeBlockHeaderSize).LargeBlockManager;
-    Result := (NativeUInt(LPLargeBlockManager) < NativeUInt(@LargeBlockManagers))
-      or (NativeUInt(LPLargeBlockManager) >= NativeUInt(@LargeBlockManagers) + SizeOf(LargeBlockManagers));
-  end
-  else if LBlockHeader and (not CBlockIsFreeFlag) = CIsDebugBlockFlag then
-  begin
-    {Claims to be a debug sub-block:  the debug header carries a checksum over its fields that a foreign block will
-    not reproduce.}
-    LPDebugBlockHeader := PFastMM_DebugBlockHeader(PAnsiChar(APointer) - CDebugBlockHeaderSize);
-    Result := LPDebugBlockHeader.HeaderCheckSum <> LPDebugBlockHeader.CalculateHeaderCheckSum;
-  end
-  else
-    Result := True;
+  Result := not FPCPointerInFastMMRegion(APointer);
 end;
 {$endif}
 

@@ -29,6 +29,13 @@ begin
   Writeln('Installation state = ', Ord(FastMM_GetInstallationState), '  (3 = mmisInstalled)');
   Check(FastMM_GetInstallationState = mmisInstalled, 'FastMM installed despite pre-existing RTL allocations');
 
+{$ifdef FPCDIAG}
+  FPCDIAG_DumpRegionRegistry;
+  Writeln('ForeignSmall  = ', NativeUInt(ForeignSmall));
+  Writeln('ForeignLarge  = ', NativeUInt(ForeignLarge));
+  Writeln('ForeignString = ', NativeUInt(Pointer(ForeignString)));
+{$endif}
+
   {MemSize on a foreign block must go to the previous manager and report at least the requested size.}
   sz := MemSize(ForeignSmall);
   Writeln('  MemSize(ForeignSmall) = ', sz);

@@ -41,6 +41,25 @@ Kompilieren (Win64, benötigt den Cross-Compiler ppcrossx64 aus
    `TObject.GetHashCode` ist `PtrInt`, und `.noframe`-ASM
    (`CountTrailingZeros32`) wird durch FPCs `BsfDWord`-Intrinsic ersetzt.
 
-Verifiziert (2026-07-18): alle Tests grün auf FPC 3.2.2 Win32 **und** Win64
-(inkl. 64M-Op-MT-Soak, 32 Threads); Delphi-Regression grün auf D7, 10 Seattle,
-13.1 (dcc32) und 13.1 Win64 (dcc64).
+## FPC-Trunk-Gegenprobe (3.3.1-Snapshot, 2026-07-18)
+
+- **Das Peephole-Load-Widening ist in Trunk behoben:** dieselbe Quelle, die
+  3.2.2 zu `mov eax,[p-2]` (4-Byte-Load) kompiliert, erzeugt unter 3.3.1
+  `testw $1,(%eax)` — ein 16-Bit-Zugriff. Kein FPC-Bugreport nötig; der
+  `NOPEEPHOLE`-Workaround bleibt für 3.2.2 drin (unter Trunk harmlos).
+- **Trunk deckte eine Schwäche der Fremd-Block-Erkennung auf:** Die
+  ursprüngliche strukturelle Header-Validierung dereferenzierte aus dem
+  (kollidierenden) Header abgeleitete Zeiger — unter Trunks Heap-Layout traf
+  das nicht gemapptes Gebiet (AV). Ersetzt durch die **OS-Region-Registry**:
+  FastMM registriert jede von VirtualAlloc bezogene Region; Ownership ist ein
+  reiner Adressbereichs-Lookup ohne jeden Header-Zugriff.
+- Dabei gefunden: Der übliche `p - base < size`-Wraparound-Trick ist unter
+  FPC/Win32 **falsch** — FPC promoted die unsigned-Subtraktion nach Int64,
+  negative Differenzen bestehen den Größenvergleich. Untere Grenze explizit
+  prüfen.
+
+Verifiziert (2026-07-18): alle Tests grün auf FPC 3.2.2 Win32, 3.2.2 Win64
+**und** Trunk 3.3.1 (inkl. 16M-Op-MT-Soak mit 32 Threads je Compiler);
+FastMM5 kompiliert auf beiden 3.2.2-Targets warnungs- und notefrei.
+Delphi-Regression grün auf D7, 10 Seattle, 13.1 (dcc32) und 13.1 Win64
+(dcc64).
