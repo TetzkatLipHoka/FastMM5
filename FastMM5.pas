@@ -187,6 +187,13 @@ type
 {$warn Unsafe_Type Off}
 {$warn Unsafe_Cast Off}
 
+{$if CompilerVersion < 20} {Delphi 2009 added the codePage and elemSize fields to the string header.  When compiled
+  with an older RTL the string headers in memory only contain refCnt and length, so FastMM_DetectStringData (and with
+  it the leak report classification) must use the old layout.  Note:  the UseDelphi5VMTOffsets option below also
+  defines this for the cross-version DLL scenario.}
+  {$define OldStringHeader}
+{$ifend}
+
 {Optionally import the legacy version 4 defines.}
 {$ifdef FastMM_IncludeLegacyOptionsFile}
   {$Include FastMM4Options.inc}
