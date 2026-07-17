@@ -201,6 +201,16 @@ type
 {$BoolEval Off}
 {$OverflowChecks Off}
 {$Optimization On}
+{$ifdef FPC}
+  (*CRITICAL for FPC:  The i386 peephole optimizer widens masked sub-word loads to 32-bit loads (e.g. the Word read in
+  BlockIsFree compiles to "mov eax, [blockheader]" instead of "movzx eax, word ptr [blockheader]").  A 4-byte read of
+  the 2-byte status-flags word of a block header that sits at the very end of a medium block span then reads 2 bytes
+  past the end of the committed region and triggers an access violation whenever the following page is not committed.
+  (This is exactly what a memory manager does when freeing the last block of a span:  it inspects the span trailer
+  header located in the last 8 bytes of the committed region.)  Peephole optimization must therefore stay disabled for
+  this unit under FPC.*)
+  {$Optimization NOPEEPHOLE}
+{$endif}
 {$StackFrames Off}
 {$TypedAddress Off}
 {$LongStrings On}
@@ -456,6 +466,16 @@ const
   visible in the interface section.}
   CDebugBlockHeaderSize = SizeOf(TFastMM_DebugBlockHeader);
   CDebugBlockFooterCheckSumSize = SizeOf(Cardinal);
+
+{$ifdef FPCDIAG}
+var
+  {Diagnostic state for hunting the FPC PurePascal medium-block free crash:  last values seen by
+  FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked before a potential crash.}
+  FPCDIAG_LastMediumBlock: Pointer;
+  FPCDIAG_LastBlockSize: Integer;
+  FPCDIAG_LastSpan: Pointer;
+  FPCDIAG_LastSpanSize: Integer;
+{$endif}
 
 type
   TFastMM_WalkAllocatedBlocksBlockType = (
@@ -5942,8 +5962,41 @@ var
   LBlockSize, LNextBlockSize, LPreviousBlockSize: Integer;
   LPNextMediumBlock: Pointer;
   LDebugModeActive, LEntireSpanFree: Boolean;
+{$ifdef FPCDIAG}
+  FPCDIAG_MemInfo: TMemoryBasicInformation;
+{$endif}
 begin
   LBlockSize := GetMediumBlockSize(APMediumBlock);
+
+{$ifdef FPCDIAG}
+  FPCDIAG_LastMediumBlock := APMediumBlock;
+  FPCDIAG_LastBlockSize := LBlockSize;
+  FPCDIAG_LastSpan := APMediumBlockSpan;
+  FPCDIAG_LastSpanSize := APMediumBlockSpan.SpanSize;
+  if (LBlockSize <= 0)
+    or (NativeUInt(APMediumBlock) < NativeUInt(APMediumBlockSpan) + CMediumBlockSpanHeaderSize)
+    or (NativeUInt(APMediumBlock) + NativeUInt(LBlockSize) > NativeUInt(APMediumBlockSpan) + NativeUInt(APMediumBlockSpan.SpanSize))
+    or (VirtualQuery(Pointer(PAnsiChar(APMediumBlock) + LBlockSize - SizeOf(TMediumBlockHeader)), FPCDIAG_MemInfo, SizeOf(FPCDIAG_MemInfo)) = 0)
+    or (FPCDIAG_MemInfo.State <> MEM_COMMIT) then
+  begin
+    Writeln('  next-hdr region state = ', FPCDIAG_MemInfo.State, ' (', MEM_COMMIT, '=committed)');
+    Writeln('FPCDIAG InternalFreeMediumBlock inconsistency:');
+    Writeln('  APMediumBlock     = ', NativeUInt(APMediumBlock));
+    Writeln('  LBlockSize        = ', LBlockSize);
+    Writeln('  APMediumBlockSpan = ', NativeUInt(APMediumBlockSpan));
+    Writeln('  Span.SpanSize     = ', APMediumBlockSpan.SpanSize);
+    Writeln('  Span.Manager      = ', NativeUInt(APMediumBlockSpan.MediumBlockManager));
+    Writeln('  Manager           = ', NativeUInt(APMediumBlockManager));
+    Writeln('  SeqFeedSpan       = ', NativeUInt(APMediumBlockManager.SequentialFeedMediumBlockSpan));
+    Writeln('  SeqFeedOffset     = ', APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue);
+    Writeln('  Hdr.SizeMul       = ', PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.MediumBlockSizeMultiple);
+    Writeln('  Hdr.SpanOffMul    = ', PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.MediumBlockSpanOffsetMultiple);
+    Writeln('  Hdr.Flags         = ', PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.BlockStatusFlags);
+    Writeln('  Hdr.IsSmallSpan   = ', PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.IsSmallBlockSpan);
+    Writeln('  Hdr.PrevFree      = ', PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.PreviousBlockIsFree);
+    Halt(42);
+  end;
+{$endif}
 
   {Snapshot the debug mode state:  Another thread may toggle debug mode while this call is in progress, and the
   bin management below has to be consistent with the choice made here.}
