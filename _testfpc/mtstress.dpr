@@ -16,6 +16,15 @@ var
   GMailbox: array[0..63] of Pointer;
   GCorruption: Integer;
 
+function XchgPtr(var ATarget: Pointer; AValue: Pointer): Pointer;
+begin
+{$ifdef CPU64}
+  Result := Pointer(InterlockedExchange64(Int64(ATarget), Int64(AValue)));
+{$else}
+  Result := Pointer(InterlockedExchange(Integer(ATarget), Integer(AValue)));
+{$endif}
+end;
+
 var
   GDumpLock: Integer;
 
@@ -84,7 +93,7 @@ begin
     if GCrossFree and (LSeed and 7 = 0) then
     begin
       LSlot := (LSeed shr 16) and 63;
-      LSwapped := Pointer(InterlockedExchange(Integer(GMailbox[LSlot]), Integer(P)));
+      LSwapped := XchgPtr(GMailbox[LSlot], P);
       if LSwapped <> nil then
         CheckAndFree(LSwapped, PInteger(LSwapped)^);
     end

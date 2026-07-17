@@ -157,14 +157,21 @@ carry an explicit FPC branch.  The hand-tuned asm paths can be re-enabled later.
   {$define CompilerVersion:=22}
   {$define RTLVersion:=22.00}
   {$define PurePascal}
+  {FPC predefines CPUX86_64 on Win64 where Delphi predefines CPUX64;  map it so the CPU switches below (including the
+  x64 branches of the atomics) select correctly.  Note that the Delphi-2009 compatibility block below defines CPUX86
+  for CompilerVersion < 23 - that must not happen on a 64-bit target, hence the CPUX64 guard there.}
+  {$ifdef CPUX86_64}
+    {$ifndef CPUX64}{$define CPUX64}{$endif}
+  {$endif}
   {The resource/memory-loaded debug DLL support is Windows-PE specific and out of scope for the initial FPC port.}
   {$define FastMM_FPC_NoMemoryLoadLibrary}
 {$endif}
 
 {Compatibility defines for compilers older than Delphi XE3.  The XE3+ code paths are not affected by these.}
-{$if CompilerVersion < 23} {Delphi 2009/2010/XE: no unit scope names, and the CPUX86 conditional is not predefined.}
+{$if CompilerVersion < 23} {Delphi 2009/2010/XE: no unit scope names, and the CPUX86 conditional is not predefined.
+  These compilers are 32-bit only, so CPUX86 must not be defined when targeting a 64-bit CPU (FPC Win64).}
   {$define FastMM_NoUnitScopeNames}
-  {$ifndef CPUX86}{$define CPUX86}{$endif}
+  {$ifndef CPUX64}{$ifndef CPUX86}{$define CPUX86}{$endif}{$endif}
 {$ifend}
 
 interface
@@ -1899,7 +1906,8 @@ type
     {Virtual method calls that will redirect to VirtualMethodOnFreedObject}
 {$IF CompilerVersion >= 20} {TObject.Equals/GetHashCode/ToString were introduced in Delphi 2009.}
     function Equals(Obj: TObject): Boolean; override;
-    function GetHashCode: Integer; override;
+    {FPC declares TObject.GetHashCode as PtrInt (64-bit on Win64).}
+    function GetHashCode: {$ifdef FPC}PtrInt{$else}Integer{$endif}; override;
     function ToString: string; override;
 {$IFEND}
     function SafeCallException(ExceptObject: TObject; ExceptAddr: Pointer): HResult; override;
@@ -4611,7 +4619,7 @@ begin
 end;
 
 {$IF CompilerVersion >= 20}
-function TFastMM_FreedObject.GetHashCode: Integer;
+function TFastMM_FreedObject.GetHashCode: {$ifdef FPC}PtrInt{$else}Integer{$endif};
 begin
   VirtualMethodOnFreedObject(CVMName_GetHashCode);
   Result := 0; //Suppress compiler warning
@@ -4758,6 +4766,14 @@ procedure TFastMM_FreedObject.VirtualMethod74; begin VirtualMethodOnFreedObject(
 
 {$if CompilerVersion < 34}
 {Returns the lowest set bit index in the 32-bit number}
+{$ifdef FPC}
+function CountTrailingZeros32(AInteger: Integer): Integer; inline;
+begin
+  {FPC does not know the Delphi ".noframe" assembler directive;  its BsfDWord intrinsic compiles to the same bsf
+  instruction on x86/x64.  The input is never zero at the call sites (a bin/group bitmap with a set bit).}
+  Result := Integer(BsfDWord(Cardinal(AInteger)));
+end;
+{$else}
 function CountTrailingZeros32(AInteger: Integer): Integer;
 asm
 {$ifdef 64Bit}
@@ -4766,6 +4782,7 @@ asm
 {$endif}
   bsf eax, eax
 end;
+{$endif}
 {$ifend}
 
 {Returns True if the block is not in use.}

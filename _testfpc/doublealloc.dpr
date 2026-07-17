@@ -21,6 +21,15 @@ begin
   Result := Integer((NativeUInt(P) shr 3) and (CTableSize - 1));
 end;
 
+function CasPtr(var ATarget: Pointer; ANew, AComparand: Pointer): Pointer;
+begin
+{$ifdef CPU64}
+  Result := Pointer(InterlockedCompareExchange64(Int64(ATarget), Int64(ANew), Int64(AComparand)));
+{$else}
+  Result := Pointer(InterlockedCompareExchange(Integer(ATarget), Integer(ANew), Integer(AComparand)));
+{$endif}
+end;
+
 function StressThread(AParam: Pointer): Integer; stdcall;
 var
   LIter, LIdx: Integer;
@@ -32,7 +41,7 @@ begin
   begin
     GetMem(P, GSize);
     LIdx := Idx(P);
-    LPrev := Pointer(InterlockedCompareExchange(Integer(GClaims[LIdx]), Integer(P), 0));
+    LPrev := CasPtr(GClaims[LIdx], P, nil);
     LTracked := LPrev = nil;
     if (LPrev <> nil) and (LPrev = P) then
     begin
@@ -46,7 +55,7 @@ begin
     FillChar(P^, GSize, $AA);
 
     if LTracked then
-      InterlockedCompareExchange(Integer(GClaims[LIdx]), 0, Integer(P));
+      CasPtr(GClaims[LIdx], nil, P);
     FreeMem(P);
   end;
   Result := 0;
