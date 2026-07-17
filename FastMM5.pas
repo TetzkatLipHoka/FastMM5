@@ -1045,10 +1045,10 @@ function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxD
   APBuffer: PAnsiChar): PAnsiChar; external CFastMM_DefaultDebugSupportLibraryName name 'LogStackTrace';
 {$endif}
 
-{$if CompilerVersion < 18}
+{$if (CompilerVersion < 18) or Defined(FPC)}
 var
   {The ReportMemoryLeaksOnShutdown System unit variable was introduced together with the FastMM4-based memory manager
-  in Delphi 2006, so it is declared here for older compilers.}
+  in Delphi 2006, so it is declared here for older compilers (and for FPC, which has no such variable).}
   ReportMemoryLeaksOnShutdown: Boolean;
 {$ifend}
 
@@ -1068,20 +1068,24 @@ uses
 function SetFilePointerEx(hFile: THandle; liDistanceToMove: Int64; lpNewFilePointer: PInt64;
   dwMoveMethod: DWORD): BOOL; stdcall; external kernel32 name 'SetFilePointerEx';
 
-{$if CompilerVersion < 18}
+{$if (CompilerVersion < 18) or Defined(FPC)}
+{$ifndef FPC}
 const
   {INVALID_FILE_ATTRIBUTES is not declared in the Windows unit of older Delphi versions.}
   INVALID_FILE_ATTRIBUTES = DWORD($FFFFFFFF);
+{$endif}
 
 type
   {The TMemoryManagerEx record (TMemoryManager extended by AllocMem and the expected memory leak management entries)
   was introduced together with the FastMM4-based memory manager in Delphi 2006.  Under older compilers it is emulated
   on top of the legacy TMemoryManager through the GetMemoryManager/SetMemoryManager wrappers below.}
   TMemoryManagerEx = record
-    {The basic (required) memory manager functionality}
-    GetMem: function(Size: Integer): Pointer;
+    {The basic (required) memory manager functionality.  FPC is strict about procedure-variable type identity, so the
+    size parameters are declared as NativeInt to match the FastMM_GetMem / FastMM_ReallocMem signatures directly;  on
+    older Delphi NativeInt is the Integer shadow, so this is unchanged there.}
+    GetMem: function(Size: {$ifdef FPC}NativeInt{$else}Integer{$endif}): Pointer;
     FreeMem: function(P: Pointer): Integer;
-    ReallocMem: function(P: Pointer; Size: Integer): Pointer;
+    ReallocMem: function(P: Pointer; Size: {$ifdef FPC}NativeInt{$else}Integer{$endif}): Pointer;
     {Extended (optional) functionality}
     AllocMem: function(Size: Cardinal): Pointer;
     RegisterExpectedMemoryLeak: function(P: Pointer): Boolean;
@@ -1094,6 +1098,99 @@ var
   extended entries in GetMemoryManager, since the System unit of older compilers only stores the legacy entries.}
   LastSetMemoryManagerEx: TMemoryManagerEx;
 
+{$ifdef FPC}
+{FPC's System.TMemoryManager is structurally different from Delphi's:  ptruint sized functions, a var-parameter
+ReAllocMem, and additional FreeMemSize / MemSize entries.  FastMM's Delphi-style TMemoryManagerEx is bridged to it
+through the wrapper functions below.  On Win32 NativeInt and ptruint are both 32-bit so the size casts are lossless.}
+var
+  {The FPC memory manager that was active before FastMM installed, captured so it can be restored on uninstall.}
+  FPCPreviousMemoryManager: System.TMemoryManager;
+  FPCPreviousMemoryManagerValid: Boolean = False;
+
+function FPCGetMemWrapper(ASize: ptruint): Pointer;
+begin
+  Result := LastSetMemoryManagerEx.GetMem(NativeInt(ASize));
+end;
+
+function FPCFreeMemWrapper(APointer: Pointer): ptruint;
+begin
+  Result := ptruint(LastSetMemoryManagerEx.FreeMem(APointer));
+end;
+
+function FPCFreeMemSizeWrapper(APointer: Pointer; ASize: ptruint): ptruint;
+begin
+  {FastMM does not need the size to free a block.}
+  Result := ptruint(LastSetMemoryManagerEx.FreeMem(APointer));
+end;
+
+function FPCAllocMemWrapper(ASize: ptruint): Pointer;
+begin
+  Result := LastSetMemoryManagerEx.AllocMem(ASize);
+end;
+
+function FPCReAllocMemWrapper(var APointer: Pointer; ASize: ptruint): Pointer;
+begin
+  APointer := LastSetMemoryManagerEx.ReallocMem(APointer, NativeInt(ASize));
+  Result := APointer;
+end;
+
+function FPCMemSizeWrapper(APointer: Pointer): ptruint;
+begin
+  Result := ptruint(FastMM_BlockMaximumUserBytes(APointer));
+end;
+
+procedure GetMemoryManager(var AMemoryManager: TMemoryManagerEx);
+var
+  LFPCMemoryManager: System.TMemoryManager;
+begin
+  System.GetMemoryManager(LFPCMemoryManager);
+  if @LFPCMemoryManager.GetMem = @FPCGetMemWrapper then
+    {FastMM is the installed memory manager:  return the extended entries as they were set.}
+    AMemoryManager := LastSetMemoryManagerEx
+  else
+  begin
+    {A foreign memory manager is installed;  the Delphi-style extended entries are not available through the bridge.
+    A nil GetMem signals SetMemoryManager to restore the captured FPC manager (used on uninstall).}
+    AMemoryManager.GetMem := nil;
+    AMemoryManager.FreeMem := nil;
+    AMemoryManager.ReallocMem := nil;
+    AMemoryManager.AllocMem := nil;
+    AMemoryManager.RegisterExpectedMemoryLeak := nil;
+    AMemoryManager.UnregisterExpectedMemoryLeak := nil;
+  end;
+end;
+
+procedure SetMemoryManager(const AMemoryManager: TMemoryManagerEx);
+var
+  LFPCMemoryManager: System.TMemoryManager;
+begin
+  LastSetMemoryManagerEx := AMemoryManager;
+
+  if not Assigned(AMemoryManager.GetMem) then
+  begin
+    {Restore request (uninstall):  put back the FPC memory manager that was active before FastMM installed.}
+    if FPCPreviousMemoryManagerValid then
+      System.SetMemoryManager(FPCPreviousMemoryManager);
+    Exit;
+  end;
+
+  System.GetMemoryManager(LFPCMemoryManager);
+  {Capture the outgoing (default) FPC manager once, so uninstall can restore it.}
+  if (not FPCPreviousMemoryManagerValid) and (@LFPCMemoryManager.GetMem <> @FPCGetMemWrapper) then
+  begin
+    FPCPreviousMemoryManager := LFPCMemoryManager;
+    FPCPreviousMemoryManagerValid := True;
+  end;
+
+  LFPCMemoryManager.GetMem := FPCGetMemWrapper;
+  LFPCMemoryManager.FreeMem := FPCFreeMemWrapper;
+  LFPCMemoryManager.FreeMemSize := FPCFreeMemSizeWrapper;
+  LFPCMemoryManager.AllocMem := FPCAllocMemWrapper;
+  LFPCMemoryManager.ReAllocMem := FPCReAllocMemWrapper;
+  LFPCMemoryManager.MemSize := FPCMemSizeWrapper;
+  System.SetMemoryManager(LFPCMemoryManager);
+end;
+{$else}
 procedure GetMemoryManager(var AMemoryManager: TMemoryManagerEx);
 var
   LLegacyMemoryManager: TMemoryManager;
@@ -1130,6 +1227,7 @@ begin
   LLegacyMemoryManager.ReallocMem := AMemoryManager.ReallocMem;
   System.SetMemoryManager(LLegacyMemoryManager);
 end;
+{$endif}
 {$ifend}
 
 {$ifdef X86ASM}
@@ -1945,6 +2043,17 @@ const
   {$define VMTOffsetsDeclared}
   {$define OldStringHeader}
 {$endif}
+
+{$if Defined(FPC) and not Defined(VMTOffsetsDeclared)}
+  {FPC's VMT layout differs from Delphi's (positive offsets from the class pointer, and there is no self-pointer
+  entry).  Map to FPC's own vmt* constants;  SelfPtrVMTOffset is unused because the self-pointer validation in
+  FastMM_DetectClassInstance is skipped for FPC.}
+  SelfPtrVMTOffset = 0;
+  TypeInfoVMTOffset = vmtTypeInfo;
+  ClassNameVMTOffset = vmtClassName;
+  ParentVMTOffset = vmtParent;
+  {$define VMTOffsetsDeclared}
+{$ifend}
 
 {$ifndef VMTOffsetsDeclared}
   {Use the VMT offsets of the Delphi version used to compile this unit if there is no override.}
@@ -3443,12 +3552,15 @@ var
       try
         {Get a pointer to the parent class' self pointer}
         LParentClassSelfPointer := PPointer(PAnsiChar(AClassPointer) + ParentVMTOffset)^;
-        {Is the "Self" pointer valid?}
+        {$ifndef FPC}
+        {Is the "Self" pointer valid?  FPC's VMT has no self-pointer entry, so this Delphi-specific validation is
+        skipped there;  the class-name sanity checks below still filter out non-class blocks.}
         if PPointer(PAnsiChar(AClassPointer) + SelfPtrVMTOffset)^ <> AClassPointer then
           begin
           Result := False;
           Exit;
           end;
+        {$endif}
 
         {Do a sanity check on the pointer to the name of the class.  The short string containing the name is always just
         after the VMT.}
@@ -11392,6 +11504,12 @@ begin
     Exit;
   end;
 
+  {PROVISIONAL for the FPC port:  FPC's RTL allocates a handful of blocks during startup, before this unit's
+  initialization can run, so TotalAllocated is never 0 under FPC.  Skipping this guard lets FastMM install and manage
+  all subsequent allocations, but blocks allocated before installation are NOT owned by FastMM;  freeing them through
+  FastMM would misbehave.  A production FPC port needs FreeMem/ReallocMem to detect foreign pointers and forward them
+  to the previously installed memory manager - see FPCPreviousMemoryManager.  TODO(fpc): foreign-block forwarding.}
+  {$ifndef FPC}
   if System.GetHeapStatus.TotalAllocated <> 0 then
   begin
 {$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
@@ -11404,6 +11522,7 @@ begin
 
     Exit;
   end;
+  {$endif}
 
   if FastMM_SetMemoryManagerEntryPoints then
   begin
