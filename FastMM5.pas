@@ -224,9 +224,11 @@ type
 {$Align 8}
 
 {Disable some compiler warnings}
+{$ifndef FPC} {FPC does not know these Delphi warning identifiers.}
 {$warn Unsafe_Code Off}
 {$warn Unsafe_Type Off}
 {$warn Unsafe_Cast Off}
+{$endif}
 
 {$if CompilerVersion < 20} {Delphi 2009 added the codePage and elemSize fields to the string header.  When compiled
   with an older RTL the string headers in memory only contain refCnt and length, so FastMM_DetectStringData (and with
@@ -3388,7 +3390,7 @@ end;
 
 function CharCount(APFirstFreeChar, APBufferStart: PWideChar): Integer; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
-  Result := Integer((NativeInt(APFirstFreeChar) - NativeInt(APBufferStart)) div SizeOf(WideChar));
+  Result := Integer((NativeUInt(APFirstFreeChar) - NativeUInt(APBufferStart)) div SizeOf(WideChar));
 end;
 
 {Converts the UTF-16 text pointed to by APWideText to UTF-8 in the buffer provided.  Returns a pointer to the byte
@@ -3535,7 +3537,7 @@ begin
       Inc(LPBufferPos, AWideCharCount * 2);
     end;
 
-    Result := OS_WriteFile(AFileHandle, LPBufferStart, Integer(NativeInt(LPBufferPos) - NativeInt(LPBufferStart)));
+    Result := OS_WriteFile(AFileHandle, LPBufferStart, Integer(NativeUInt(LPBufferPos) - NativeUInt(LPBufferStart)));
 
   finally
     OS_FreeVirtualMemory(LPBufferStart, LBufferSize);
@@ -5712,7 +5714,7 @@ end;
 
 function GetMediumBlockSpan(APMediumBlock: Pointer): PMediumBlockSpanHeader; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
-  Result := PMediumBlockSpanHeader(NativeUInt(APMediumBlock)
+  Result := PMediumBlockSpanHeader(PAnsiChar(APMediumBlock)
     - (PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.MediumBlockSpanOffsetMultiple shl CMediumBlockAlignmentBits));
 end;
 
@@ -6221,7 +6223,7 @@ begin
 
     {May need a memory fence here for ARM.}
 
-    APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := Integer(NativeInt(Result) - NativeInt(LPNewSpan));
+    APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := Integer(NativeUInt(Result) - NativeUInt(LPNewSpan));
   end
   else
   begin
@@ -7384,13 +7386,13 @@ begin
     if ABlockHasDebugInfo then
     begin
       PSmallBlockHeader(PAnsiChar(APSmallBlock) - SizeOf(TSmallBlockHeader))^.BlockStatusFlagsAndSpanOffset :=
-        Word((((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
+        Word((((NativeUInt(APSmallBlock) - NativeUInt(APSmallBlockSpan)) and NativeUInt(-CMediumBlockAlignment)) shr CSmallBlockSpanOffsetBitShift)
         + (CHasDebugInfoFlag + CBlockIsFreeFlag + CIsSmallBlockFlag));
     end
     else
     begin
       PSmallBlockHeader(PAnsiChar(APSmallBlock) - SizeOf(TSmallBlockHeader))^.BlockStatusFlagsAndSpanOffset :=
-        Word((((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
+        Word((((NativeUInt(APSmallBlock) - NativeUInt(APSmallBlockSpan)) and NativeUInt(-CMediumBlockAlignment)) shr CSmallBlockSpanOffsetBitShift)
         + (CBlockIsFreeFlag + CIsSmallBlockFlag));
     end;
 
@@ -7401,13 +7403,13 @@ begin
     if ABlockHasDebugInfo then
     begin
       PSmallBlockHeader(PAnsiChar(APSmallBlock) - SizeOf(TSmallBlockHeader))^.BlockStatusFlagsAndSpanOffset :=
-        Word((((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift)
+        Word((((NativeUInt(APSmallBlock) - NativeUInt(APSmallBlockSpan)) and NativeUInt(-CMediumBlockAlignment)) shr CSmallBlockSpanOffsetBitShift)
         + (CHasDebugInfoFlag + CIsSmallBlockFlag));
     end
     else
     begin
       PSmallBlockHeader(PAnsiChar(APSmallBlock) - SizeOf(TSmallBlockHeader))^.BlockStatusFlagsAndSpanOffset :=
-        Word(((NativeInt(APSmallBlock) - NativeInt(APSmallBlockSpan)) and -CMediumBlockAlignment) shr CSmallBlockSpanOffsetBitShift
+        Word(((NativeUInt(APSmallBlock) - NativeUInt(APSmallBlockSpan)) and NativeUInt(-CMediumBlockAlignment)) shr CSmallBlockSpanOffsetBitShift
         + CIsSmallBlockFlag);
     end;
 
@@ -7417,8 +7419,10 @@ end;
 
 function GetSpanForSmallBlock(APSmallBlock: Pointer): PSmallBlockSpanHeader; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
-  Result := Pointer((NativeInt(APSmallBlock) and -CMediumBlockAlignment)
-    - (CDropSmallBlockFlagsMask and PBlockStatusFlags(PAnsiChar(APSmallBlock) - SizeOf(TBlockStatusFlags))^) shl CSmallBlockSpanOffsetBitShift);
+  {The outer NativeUInt cast undoes FPC's promotion of the unsigned subtraction to Int64, which would otherwise
+  trigger a "conversion between ordinals and pointers is not portable" warning for the pointer cast.}
+  Result := Pointer(NativeUInt((NativeUInt(APSmallBlock) and NativeUInt(-CMediumBlockAlignment))
+    - NativeUInt((CDropSmallBlockFlagsMask and PBlockStatusFlags(PAnsiChar(APSmallBlock) - SizeOf(TBlockStatusFlags))^) shl CSmallBlockSpanOffsetBitShift)));
 end;
 
 {$ifdef FPC}
@@ -8264,7 +8268,7 @@ begin
         {Before trying to lock the manager, first check whether it currently has either a non-empty pending free list or
         it has a partially free span.}
         if ((APSmallBlockManager.PendingFreeList <> nil)
-            or (NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager)))
+            or (Pointer(APSmallBlockManager.FirstPartiallyFreeSpan) <> Pointer(APSmallBlockManager)))
           and (AtomicExchange(APSmallBlockManager.SmallBlockManagerLocked, 1) = 0) then
         begin
 
@@ -8276,7 +8280,7 @@ begin
             end;
 
           {Try to allocate a block from the first partially free span.}
-          if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
+          if Pointer(APSmallBlockManager.FirstPartiallyFreeSpan) <> Pointer(APSmallBlockManager) then
             begin
             result := FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager);
             Exit;
@@ -8330,7 +8334,7 @@ begin
           end;
 
         {Try to get a block from the first partially free span.}
-        if NativeInt(APSmallBlockManager.FirstPartiallyFreeSpan) <> NativeInt(APSmallBlockManager) then
+        if Pointer(APSmallBlockManager.FirstPartiallyFreeSpan) <> Pointer(APSmallBlockManager) then
           begin
           result := FastMM_GetMem_GetSmallBlock_AllocateFreeBlockAndUnlockArena(APSmallBlockManager);
           Exit;
@@ -9703,7 +9707,7 @@ begin
                       begin
                         LBlockInfo.BlockSize := LPSmallBlockManager.BlockSize;
                         LBlockInfo.UsableSize := LPSmallBlockManager.BlockSize - CSmallBlockHeaderSize;
-                        LBlockInfo.ArenaIndex := Byte((NativeInt(LPSmallBlockManager) - NativeInt(@SmallBlockManagers)) div SizeOf(TSmallBlockArena));
+                        LBlockInfo.ArenaIndex := Byte((NativeUInt(LPSmallBlockManager) - NativeUInt(@SmallBlockManagers)) div SizeOf(TSmallBlockArena));
                         LBlockInfo.BlockType := btSmallBlock;
                         LBlockInfo.IsSequentialFeedMediumBlockSpan := False;
                         LBlockInfo.MediumBlockSequentialFeedSpanUnusedBytes := 0;
@@ -11165,6 +11169,7 @@ var
   LBlockSizeIndex, LSmallBlockSize, LManagerIndex, LStartIndex, LNextStartIndex, LAndValue: Integer;
 begin
   {Determine the allowed small block alignments.  Under 64-bit the minimum alignment is always 16 bytes.}
+{$ifdef FPC}{$push}{$warn 6018 off} {The SizeOf(Pointer) test folds to a constant, making the final else branch unreachable on Win64.}{$endif}
   if AlignmentRequestCounters[maa64Bytes] > 0 then
     LAndValue := 63
   else if AlignmentRequestCounters[maa32Bytes] > 0 then
@@ -11173,6 +11178,7 @@ begin
     LAndValue := 15
   else
     LAndValue := 0;
+{$ifdef FPC}{$pop}{$endif}
 
   LStartIndex := 0;
   for LBlockSizeIndex := 0 to High(CSmallBlockSizes) do
@@ -11232,6 +11238,7 @@ end;
 {Returns the current minimum address alignment in effect.}
 function FastMM_GetCurrentMinimumAddressAlignment: TFastMM_MinimumAddressAlignment;
 begin
+{$ifdef FPC}{$push}{$warn 6018 off} {The SizeOf(Pointer) test folds to a constant, making the final else branch unreachable on Win64.}{$endif}
   if AlignmentRequestCounters[maa64Bytes] > 0 then
     Result := maa64Bytes
   else if AlignmentRequestCounters[maa32Bytes] > 0 then
@@ -11240,6 +11247,7 @@ begin
     Result := maa16Bytes
   else
     Result := maa8Bytes;
+{$ifdef FPC}{$pop}{$endif}
 end;
 
 {Allows the application to specify a maximum amount of memory that may be allocated through FastMM.  An attempt to
@@ -12197,6 +12205,12 @@ end;
 
 {$ifndef FastMM_DisableAutomaticInstall}
 initialization
+{$ifdef FPC}
+  {Touch the copyright message so FPC does not flag it as unused - it is deliberately embedded in the binary without
+  being referenced by code.}
+  if CCopyrightMessage = nil then
+    Exit;
+{$endif}
   FastMM_Initialize;
 
 finalization
