@@ -148,15 +148,26 @@ unit FastMM5;
 (*Free Pascal support (Windows target).  FPC does not predefine Delphi's CompilerVersion / RTLVersion constants that the
 version switches below rely on, so they are supplied here as macros (FPC evaluates the IF CompilerVersion switches
 correctly against a macro).  CompilerVersion 22 selects the wanted behaviour throughout:  no unit scope names and an
-explicit CPUX86 define, no Delphi-2009 NativeInt/PUInt64/OldStringHeader shims, and inline enabled.  Assembler is
-disabled for the initial bring-up via PurePascal - all block-management BASM has Pascal fallbacks, and only the atomics
-carry an explicit FPC branch.  The hand-tuned asm paths can be re-enabled later.*)
+explicit CPUX86 define, no Delphi-2009 NativeInt/PUInt64/OldStringHeader shims, and inline enabled.
+
+On Win32 the hand-tuned x86 assembly language code paths are enabled:  FPC's intel assembler reader accepts the
+Delphi BASM idioms used here (typecast-style record field references, symbolic constants, tail jumps into Pascal
+functions), uses the same register calling convention, and like Delphi it does not generate a stack frame for pure
+assembler routines.  On Win64 the assembly language code paths are disabled via PurePascal for now:  the x64 blocks
+use the Delphi-specific ".noframe" assembler directive, which FPC does not know.*)
   {$mode delphi}
   {$asmmode intel}
   {$macro on}
   {$define CompilerVersion:=22}
   {$define RTLVersion:=22.00}
-  {$define PurePascal}
+  {$ifdef CPUX86_64}
+    {$define PurePascal}
+  {$endif}
+  {The FreeMem/ReallocMem entry points must stay on their Pascal code paths under FPC:  they carry the foreign-block
+  check that forwards blocks allocated by the FPC RTL before FastMM installed to the previous memory manager.  The
+  assembly language dispatchers do not have that check.  All the inner block-management routines they dispatch to
+  still use the assembly language code paths.}
+  {$define FastMM_ForeignBlockDispatchInPascal}
   {FPC predefines CPUX86_64 on Win64 where Delphi predefines CPUX64;  map it so the CPU switches below (including the
   x64 branches of the atomics) select correctly.  Note that the Delphi-2009 compatibility block below defines CPUX86
   for CompilerVersion < 23 - that must not happen on a 64-bit target, hence the CPUX64 guard there.}
@@ -6436,10 +6447,10 @@ asm
   PreviousBlockIsFree or IsSmallBlockSpan fields since they will already be zero.  Similarly it is not necessary to set
   the "previous block is free" flag in the next block.}
   shr ecx, CMediumBlockAlignmentBits
-  mov TMediumBlockHeader.MediumBlockSizeMultiple(eax - CMediumBlockHeaderSize), cx
+  mov [eax - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple], cx
   shr ebx, CMediumBlockAlignmentBits
-  mov TMediumBlockHeader.MediumBlockSpanOffsetMultiple(eax - CMediumBlockHeaderSize), bx
-  mov TMediumBlockHeader.BlockStatusFlags(eax - CMediumBlockHeaderSize), CIsMediumBlockFlag
+  mov [eax - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSpanOffsetMultiple], bx
+  mov word ptr [eax - CMediumBlockHeaderSize + TMediumBlockHeader.BlockStatusFlags], CIsMediumBlockFlag
 
   jmp @Done
 
@@ -6604,9 +6615,16 @@ Unlocks the arena before returning.  Returns a pointer to the allocated block.}
 function FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena(APMediumBlockManager: PMediumBlockManager;
   AMinimumBlockSizeBinNumber, AOptimalBlockSize, AMaximumBlockSize: Integer): Pointer;
 {$ifndef PurePascal}
+{$ifdef FPC}
+{The routine uses ebp as a scratch register.  Delphi generates a "push ebp" prologue for assembler routines with
+stack parameters but its epilogue only pops (it does not restore esp from ebp), so the clobbered ebp is harmless
+there.  FPC's standard epilogue does "mov esp, ebp", which crashes with a clobbered ebp - so under FPC the frame is
+suppressed entirely, and the stack parameter sits 4 bytes lower (no saved ebp between it and the pushes below).}
+assembler; nostackframe;
+{$endif}
 const
   {The maximum block size is stored on the stack.}
-  CMaximumSizeStackOffset = {$ifdef 32Bit}20{$else}80{$endif};
+  CMaximumSizeStackOffset = {$ifdef 32Bit}{$ifdef FPC}16{$else}20{$endif}{$else}80{$endif};
 asm
 {$ifdef X86ASM}
   {-------x86 Assembly language codepath--------}
@@ -6627,7 +6645,7 @@ asm
   and ecx, edi
   or eax, -1
   shl eax, cl
-  and eax, dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edx * 4)
+  and eax, dword ptr [esi + edx * 4 + TMediumBlockManager.MediumBlockBinBitmaps]
   jnz @GotBin
   {There are no suitable free blocks in the group containing AMinimumBlockSizeBinNumber, so get a free block from any
   subsequent group.}
@@ -6638,7 +6656,7 @@ asm
   {Get the first group with large enough blocks in edx}
   bsf edx, edx
   {Get the bin bitmap for the next group with free blocks}
-  mov eax, dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edx * 4)
+  mov eax, dword ptr [esi + edx * 4 + TMediumBlockManager.MediumBlockBinBitmaps]
 @GotBin:
 
   {Group bitmap is in eax, group number in edx:  Find the first bin with free blocks in the group}
@@ -6648,7 +6666,7 @@ asm
   add eax, edx
 
   {Get the first free block in the bin}
-  mov edi, dword ptr TMediumBlockManager.FirstFreeBlockInBin(esi + eax * 4)
+  mov edi, dword ptr [esi + eax * 4 + TMediumBlockManager.FirstFreeBlockInBin]
 
   mov eax, esi
   mov edx, edi
@@ -6667,7 +6685,7 @@ asm
 @DebugInfoOK:
 
   {Get the block size in ebx}
-  movzx ebx, TMediumBlockHeader.MediumBlockSizeMultiple(edi - CMediumBlockHeaderSize)
+  movzx ebx, word ptr [edi - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple]
   shl ebx, CMediumBlockAlignmentBits
 
   {Should the block be split?}
@@ -6683,24 +6701,24 @@ asm
   lea edx, [edi + ebx]
 
   {Get the span offset multiple of the first split in eax.}
-  movzx eax, TMediumBlockHeader.MediumBlockSpanOffsetMultiple(edi - CMediumBlockHeaderSize)
+  movzx eax, word ptr [edi - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSpanOffsetMultiple]
 
   {The second split should already be tagged as a free block in the next block's header, but we need to set the size of
   the second split in its own footer.}
-  mov TMediumFreeBlockFooter.MediumFreeBlockSize(edx + ecx - CMediumFreeBlockFooterSize), ecx
+  mov [edx + ecx - CMediumFreeBlockFooterSize + TMediumFreeBlockFooter.MediumFreeBlockSize], ecx
   {Set the second split's block size in its header}
   mov ebp, ecx
   shr ebp, CMediumBlockAlignmentBits
-  mov TMediumBlockHeader.MediumBlockSizeMultiple(edx - CMediumBlockHeaderSize), bp
+  mov [edx - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple], bp
   {Set the span offset for the second split.  It is the sum of the offset and size multiples of the first split.}
   mov ebp, ebx
   shr ebp, CMediumBlockAlignmentBits
   add ebp, eax
-  mov TMediumBlockHeader.MediumBlockSpanOffsetMultiple(edx - CMediumBlockHeaderSize), bp
+  mov [edx - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSpanOffsetMultiple], bp
   {Set the block flags for the second split}
-  mov TMediumBlockHeader.BlockStatusFlags(edx - CMediumBlockHeaderSize), CBlockIsFreeFlag + CIsMediumBlockFlag
+  mov word ptr [edx - CMediumBlockHeaderSize + TMediumBlockHeader.BlockStatusFlags], CBlockIsFreeFlag + CIsMediumBlockFlag
   {Ensure the second split is not marked as a small block span.}
-  mov TMediumBlockHeader.IsSmallBlockSpan(edx - CMediumBlockHeaderSize), False
+  mov byte ptr [edx - CMediumBlockHeaderSize + TMediumBlockHeader.IsSmallBlockSpan], False
 
   {Bin the second split.}
   cmp ecx, CMinimumMediumBlockSize
@@ -6711,12 +6729,12 @@ asm
 
   {Update the flag in the next block to indicate that this block is now in use.  The block size is not stored before
   the header of the next block if it is not free.}
-  mov TMediumBlockHeader.PreviousBlockIsFree(edi + ebx - CMediumBlockHeaderSize), False
+  mov byte ptr [edi + ebx - CMediumBlockHeaderSize + TMediumBlockHeader.PreviousBlockIsFree], False
   {Set the block flags}
-  mov TMediumBlockHeader.BlockStatusFlags(edi - CMediumBlockHeaderSize), CIsMediumBlockFlag
+  mov word ptr [edi - CMediumBlockHeaderSize + TMediumBlockHeader.BlockStatusFlags], CIsMediumBlockFlag
   {Update the block size.}
   shr ebx, CMediumBlockAlignmentBits
-  mov TMediumBlockHeader.MediumBlockSizeMultiple(edi - CMediumBlockHeaderSize), bx
+  mov [edi - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple], bx
 
   mov byte ptr TMediumBlockManager(esi).MediumBlockManagerLocked, 0
 
@@ -6979,7 +6997,7 @@ asm
   jne @Attempt1TryLock
   test TMediumBlockManager(esi).MediumBlockBinGroupBitmap, ebp
   jnz @Attempt1TryLock
-  test dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edi * 4), ebx
+  test dword ptr [esi + edi * 4 + TMediumBlockManager.MediumBlockBinBitmaps], ebx
   jz @Attempt1NextManager
 @Attempt1TryLock:
   mov al, 1
@@ -6994,7 +7012,7 @@ asm
   mov eax, esi
   mov edx, [esp + CMinimumBlockSizeOffset]
   mov ecx, [esp + COptimalBlockSizeOffset]
-  push [esp + CMaximumBlockSizeOffset]
+  push dword ptr [esp + CMaximumBlockSizeOffset]
   call FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock
   test eax, eax
   jnz @UnlockManagerAndExit
@@ -7003,13 +7021,13 @@ asm
   {1.2) Try to find a suitable free block in the free lists}
   test TMediumBlockManager(esi).MediumBlockBinGroupBitmap, ebp
   jnz @Attempt1HasFreeBlock
-  test dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edi * 4), ebx
+  test dword ptr [esi + edi * 4 + TMediumBlockManager.MediumBlockBinBitmaps], ebx
   jz @Attempt1NoFreeBlocks
 @Attempt1HasFreeBlock:
   mov eax, esi
   mov edx, [esp + CBinNumberOffset]
   mov ecx, [esp + COptimalBlockSizeOffset]
-  push [esp + CMaximumBlockSizeOffset]
+  push dword ptr [esp + CMaximumBlockSizeOffset]
   call FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena
   jmp @Done
 @Attempt1NoFreeBlocks:
@@ -7074,13 +7092,13 @@ asm
   {3.1) Try to allocate a free block.  Another thread may have freed a block before this arena could be locked.}
   test TMediumBlockManager(esi).MediumBlockBinGroupBitmap, ebp
   jnz @Attempt3HasFreeBlock
-  test dword ptr TMediumBlockManager.MediumBlockBinBitmaps(esi + edi * 4), ebx
+  test dword ptr [esi + edi * 4 + TMediumBlockManager.MediumBlockBinBitmaps], ebx
   jz @Attempt3NoFreeBlocks
 @Attempt3HasFreeBlock:
   mov eax, esi
   mov edx, [esp + CBinNumberOffset]
   mov ecx, [esp + COptimalBlockSizeOffset]
-  push [esp + CMaximumBlockSizeOffset]
+  push dword ptr [esp + CMaximumBlockSizeOffset]
   call FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena
   jmp @Done
 @Attempt3NoFreeBlocks:
@@ -7105,7 +7123,7 @@ asm
   mov eax, esi
   mov edx, [esp + CMinimumBlockSizeOffset]
   mov ecx, [esp + COptimalBlockSizeOffset]
-  push [esp + CMaximumBlockSizeOffset]
+  push dword ptr [esp + CMaximumBlockSizeOffset]
   call FastMM_GetMem_GetMediumBlock_TryReusePendingFreeBlock
   test eax, eax
   jnz @UnlockManagerAndExit
@@ -7489,7 +7507,7 @@ function FastMM_ReallocMem_ReallocMediumBlock(APointer: Pointer; ANewUserSize: N
 {$ifdef X86ASM}
 asm
   {Get the old user size in ecx}
-  movzx ecx, TMediumBlockHeader.MediumBlockSizeMultiple(eax - CMediumBlockHeaderSize)
+  movzx ecx, word ptr [eax - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple]
   shl ecx, CMediumBlockAlignmentBits
   sub ecx, CMediumBlockHeaderSize
 
@@ -7604,7 +7622,7 @@ asm
   mov ebx, TSmallBlockSpanHeader(eax).FirstFreeBlock
 
   {Mark the block as free, keeping the other flags (e.g. debug info) intact.}
-  or TSmallBlockHeader.BlockStatusFlagsAndSpanOffset(edx - CSmallBlockHeaderSize), CBlockIsFreeFlag
+  or word ptr [edx - CSmallBlockHeaderSize + TSmallBlockHeader.BlockStatusFlagsAndSpanOffset], CBlockIsFreeFlag
 
   {Store the old first free block}
   mov [edx], ebx
@@ -7658,7 +7676,7 @@ asm
 
   {Clear the small block span flag in the header of the medium block.  This is important in case the block is ever
   reused and allocated blocks subsequently enumerated.}
-  mov TMediumBlockHeader.IsSmallBlockSpan(eax - CMediumBlockHeaderSize), False
+  mov byte ptr [eax - CMediumBlockHeaderSize + TMediumBlockHeader.IsSmallBlockSpan], False
 
   {Free the span}
   pop ebx
@@ -7822,7 +7840,7 @@ asm
   mov ebx, eax
 
   {Get the span size in eax}
-  movzx eax, TMediumBlockHeader.MediumBlockSizeMultiple(eax - CMediumBlockHeaderSize)
+  movzx eax, word ptr [eax - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple]
   shl eax, CMediumBlockAlignmentBits
 
   {Calculate the number of small blocks that will fit inside the span.  We need to account for the span header,
@@ -7835,7 +7853,7 @@ asm
   div ecx
 
   {Update the medium block header to indicate that this medium block serves as a small block span.}
-  mov TMediumBlockHeader.IsSmallBlockSpan(ebx - CMediumBlockHeaderSize), True
+  mov byte ptr [ebx - CMediumBlockHeaderSize + TMediumBlockHeader.IsSmallBlockSpan], True
 
   {Set up the block span.  Blocks that will eventually be fed sequentially are counted as in use.}
   mov TSmallBlockSpanHeader(ebx).SmallBlockManager, esi
@@ -7862,7 +7880,7 @@ asm
   {Set the header for the returned block.}
   shr ecx, CMediumBlockAlignmentBits
   lea ecx, [ecx * 8 + CIsSmallBlockFlag] //Low 3 bits are used by flags
-  mov TSmallBlockHeader.BlockStatusFlagsAndSpanOffset(eax - CSmallBlockHeaderSize), cx
+  mov [eax - CSmallBlockHeaderSize + TSmallBlockHeader.BlockStatusFlagsAndSpanOffset], cx
 
 @Done:
   pop esi
@@ -8758,7 +8776,7 @@ begin
 end;
 
 function FastMM_FreeMem(APointer: Pointer): Integer;
-{$ifndef PurePascal}
+{$if (not defined(PurePascal)) and (not defined(FastMM_ForeignBlockDispatchInPascal))}
 asm
 {$ifdef X86ASM}
 
@@ -8980,7 +8998,7 @@ begin
       end;
     end;
   end;
-{$endif}
+{$ifend}
 end;
 
 function FastMM_FreeMem_EraseBeforeFree(APointer: Pointer): Integer;
@@ -9007,7 +9025,7 @@ begin
 end;
 
 function FastMM_ReallocMem(APointer: Pointer; ANewSize: NativeInt): Pointer;
-{$ifndef PurePascal}
+{$if (not defined(PurePascal)) and (not defined(FastMM_ForeignBlockDispatchInPascal))}
 asm
 {$ifdef X86ASM}
   {--------x86 Assembly language codepath---------}
@@ -9111,7 +9129,7 @@ begin
 
     end;
   end;
-{$endif}
+{$ifend}
 end;
 
 function FastMM_AllocMem(ASize: NativeInt): Pointer;

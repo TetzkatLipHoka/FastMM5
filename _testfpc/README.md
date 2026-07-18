@@ -41,6 +41,31 @@ Kompilieren (Win64, benötigt den Cross-Compiler ppcrossx64 aus
    `TObject.GetHashCode` ist `PtrInt`, und `.noframe`-ASM
    (`CountTrailingZeros32`) wird durch FPCs `BsfDWord`-Intrinsic ersetzt.
 
+## BASM-Reaktivierung unter FPC-Win32 (2026-07-18)
+
+Die handoptimierten x86-Assembler-Pfade (X86ASM) sind unter FPC-Win32 aktiv;
+nur Win64 bleibt PurePascal (dortiges asm nutzt Delphis `.noframe`-Direktive).
+Notwendige Anpassungen (alle beidseitig gültig):
+
+- `TType.Field(reg - const)`-Memory-Operanden → portable Bracket-Form
+  `[reg - const + TType.Field]` (24 Stellen; explizite `word ptr`/`byte ptr`
+  bei Immediates, da die Feldtyp-Information verloren geht). Die Typecast-Form
+  `TType(reg).Field` versteht FPC nur mit nacktem Register.
+- `(A or B)`/`(not A)`-Konstantenausdrücke im asm versteht FPC nicht — die
+  betroffenen Dispatcher laufen unter FPC ohnehin in Pascal (s.u.).
+- **Stackframe-Falle:** Delphi erzeugt für asm-Routinen mit Stack-Parametern
+  einen `push ebp`-Prolog, der Epilog poppt aber nur (kein `mov esp,ebp`) —
+  das asm darf ebp als Scratch nutzen. FPCs Epilog macht `mov esp,ebp` →
+  Absturz. Fix: `assembler; nostackframe;` unter FPC + Stack-Offset −4
+  (betrifft `FastMM_GetMem_GetMediumBlock_AllocateFreeBlockAndUnlockArena`).
+- FreeMem/ReallocMem-Dispatcher bleiben unter FPC Pascal
+  (`FastMM_ForeignBlockDispatchInPascal`): sie tragen den Fremd-Block-Check,
+  den die asm-Dispatcher nicht haben. Alle inneren Hot-Paths sind asm.
+
+Benchmark FPC 3.2.2 Win32, BASM vs. PurePascal (bench.dpr, -O2):
+Small-Block-Ping-Pong **+47–50 %** (84 → 124–127k ops/ms), Batch +17 %,
+Realloc +24 %, Mixed +10 %, MT contention-bound unverändert.
+
 ## FPC-Trunk-Gegenprobe (3.3.1-Snapshot, 2026-07-18)
 
 - **Das Peephole-Load-Widening ist in Trunk behoben:** dieselbe Quelle, die
