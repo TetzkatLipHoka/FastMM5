@@ -13,7 +13,8 @@ Kompilieren (Beispiel Delphi 7):
 | `FastMM5Diag_DebugMode.dpr` | Basistest Debug-Modus: Header-Layout (SizeOf muss 64 sein), GetMem/FreeMem, Größen-Schleife, Realloc-Kette — einzelthreaded. |
 | `FastMM5Diag_SizeClasses.dpr` | Debug-Modus über alle Größenklassen (Small/Medium/Large bis 2 MB) inkl. klassenübergreifender Reallocs. |
 | `FastMM5Diag_UsagePerSizeClass.dpr` | Leck-Detektor: hämmert GetMem/FreeMem pro Größenklasse und druckt danach `FastMM_GetUsageSummary` — Allokiert/Overhead müssen konstant bleiben. |
-| `FastMM5Diag_MultiThreadStress.dpr` | Parametrisierbarer Multithread-Stresstest: `Threads Iterationen MaxSize Debug(0/1) CrossFree(0/1)`. Druckt am Ende die Usage-Bilanz. |
+| `FastMM5Diag_MultiThreadStress.dpr` | Parametrisierbarer Multithread-Stresstest: `Threads Iterationen MaxSize Debug(0/1) CrossFree(0/1)`. Druckt am Ende die Usage-Bilanz. Nur dcc32 (32-bit-Interlocked-Casts). |
+| `FastMM5Diag_SSE2Check.dpr` | Verifiziert, dass SSE2 auch unter Delphi 7 voll aktiv ist: movdqu-Opcodes byte-korrekt assembliert (D7s BASM kann SSE2 nativ — kein db-Hardcoding nötig), CPUID-Erkennung (`Compat_TestSSE`-Logik) wählt die SSE2-Moves, Realloc-Upsize durch alle SSE2-Klassen erhält Inhalte. |
 
 ## Debug-Modus-Adressraumwachstum (Upstream-Bug, im Fork behoben)
 
