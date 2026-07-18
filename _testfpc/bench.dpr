@@ -141,7 +141,7 @@ begin
   {$ifdef PurePascal}
   Writeln('build: PurePascal');
   {$else}
-  Writeln('build: BASM (X86ASM)');
+  Writeln('build: BASM');
   {$endif}
   Writeln('state=', Ord(FastMM_GetInstallationState));
 

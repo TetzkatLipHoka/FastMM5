@@ -41,10 +41,10 @@ Kompilieren (Win64, benötigt den Cross-Compiler ppcrossx64 aus
    `TObject.GetHashCode` ist `PtrInt`, und `.noframe`-ASM
    (`CountTrailingZeros32`) wird durch FPCs `BsfDWord`-Intrinsic ersetzt.
 
-## BASM-Reaktivierung unter FPC-Win32 (2026-07-18)
+## BASM-Reaktivierung unter FPC (2026-07-18)
 
-Die handoptimierten x86-Assembler-Pfade (X86ASM) sind unter FPC-Win32 aktiv;
-nur Win64 bleibt PurePascal (dortiges asm nutzt Delphis `.noframe`-Direktive).
+Die handoptimierten Assembler-Pfade sind unter FPC auf **beiden** Targets
+aktiv: X86ASM auf Win32, X64ASM auf Win64.
 Notwendige Anpassungen (alle beidseitig gültig):
 
 - `TType.Field(reg - const)`-Memory-Operanden → portable Bracket-Form
@@ -62,9 +62,25 @@ Notwendige Anpassungen (alle beidseitig gültig):
   (`FastMM_ForeignBlockDispatchInPascal`): sie tragen den Fremd-Block-Check,
   den die asm-Dispatcher nicht haben. Alle inneren Hot-Paths sind asm.
 
-Benchmark FPC 3.2.2 Win32, BASM vs. PurePascal (bench.dpr, -O2):
-Small-Block-Ping-Pong **+47–50 %** (84 → 124–127k ops/ms), Batch +17 %,
-Realloc +24 %, Mixed +10 %, MT contention-bound unverändert.
+X64-Spezifika (FPC-Win64):
+
+- `.noframe` → `assembler; nostackframe;` (ohne den Modifier polstert FPC
+  den Stack um 8 Bytes für die Alignment-Invariante — bricht manuelle
+  rsp-Offsets und explizite `ret`s).
+- `.pushnv rbx/rsi/rdi` + `.params 3` (AllocateFreeBlockAndUnlockArena
+  medium): unter FPC exakt repliziert als 3 Pushes + `sub rsp,$20`
+  (Gesamt-Displacement 56 → die `[rsp+80]`-Home-Space-Referenzen bleiben
+  gültig).
+- `lea rdx, Symbol` assembliert FPC als 32-bit-Absolut-Relokation (Linker
+  warnt!) — bei FPCs Win64-Imagebase über 4 GB fatal → explizit
+  `lea rdx, [rip + Symbol]` unter FPC (Delphi macht RIP-relativ automatisch).
+
+Benchmark BASM vs. PurePascal (bench.dpr, -O2, FPC 3.2.2):
+Win32: Small-Block-Ping-Pong **+47–50 %** (84 → 124–127k ops/ms), Batch
++17 %, Realloc +24 %, Mixed +10 %, MT contention-bound unverändert.
+Win64: Ping-Pong +10 %, Batch +11–13 %, Realloc +19 %, MT +10–12 %
+(moderater: auf x64 sind nur Sequential-Feed, Medium-Bin-Alloc, der
+GetMem-Dispatcher und die Moves asm, und FPCs x64-Codegen ist stärker).
 
 ## FPC-Trunk-Gegenprobe (3.3.1-Snapshot, 2026-07-18)
 

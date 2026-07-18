@@ -150,19 +150,18 @@ version switches below rely on, so they are supplied here as macros (FPC evaluat
 correctly against a macro).  CompilerVersion 22 selects the wanted behaviour throughout:  no unit scope names and an
 explicit CPUX86 define, no Delphi-2009 NativeInt/PUInt64/OldStringHeader shims, and inline enabled.
 
-On Win32 the hand-tuned x86 assembly language code paths are enabled:  FPC's intel assembler reader accepts the
-Delphi BASM idioms used here (typecast-style record field references, symbolic constants, tail jumps into Pascal
-functions), uses the same register calling convention, and like Delphi it does not generate a stack frame for pure
-assembler routines.  On Win64 the assembly language code paths are disabled via PurePascal for now:  the x64 blocks
-use the Delphi-specific ".noframe" assembler directive, which FPC does not know.*)
+The hand-tuned assembly language code paths are enabled on both Win32 and Win64:  FPC's intel assembler reader
+accepts the Delphi BASM idioms used here (typecast-style record field references with a bare register, bracket-form
+field offsets, symbolic constants, tail jumps into Pascal functions) and uses the same calling conventions.  Delphi's
+x64 assembler directives are not understood by FPC and are mapped as follows:  ".noframe" becomes the
+"assembler; nostackframe;" procedure directive (FPC otherwise pads the stack by 8 bytes for alignment, which would
+break the manually maintained rsp offsets and explicit ret instructions), and ".pushnv"/".params" prologues are
+replicated with explicit push/sub rsp instructions under {$ifdef FPC}.*)
   {$mode delphi}
   {$asmmode intel}
   {$macro on}
   {$define CompilerVersion:=22}
   {$define RTLVersion:=22.00}
-  {$ifdef CPUX86_64}
-    {$define PurePascal}
-  {$endif}
   {The FreeMem/ReallocMem entry points must stay on their Pascal code paths under FPC:  they carry the foreign-block
   check that forwards blocks allocated by the FPC RTL before FastMM installed to the previous memory manager.  The
   assembly language dispatchers do not have that check.  All the inner block-management routines they dispatch to
@@ -2283,6 +2282,7 @@ end;
 {Moves 16 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned for 32-bit code and 16 byte
 aligned for 64-bit code, and the buffers may not overlap.}
 procedure Move16(const ASource; var ADest; ACount: NativeInt);
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -2291,7 +2291,7 @@ asm
   fistp qword ptr [edx + 8]
   fistp qword ptr [edx]
 {$else}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   movdqa xmm0, [rcx]
   movdqa [rdx], xmm0
 {$endif}
@@ -2305,6 +2305,7 @@ end;
 {Moves 32 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned for 32-bit code and 16 byte
 aligned for 64-bit code, and the buffers may not overlap.}
 procedure Move32(const ASource; var ADest; ACount: NativeInt);
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -2317,7 +2318,7 @@ asm
   fistp qword ptr [edx + 8]
   fistp qword ptr [edx]
 {$else}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   movdqa xmm0, [rcx]
   movdqa xmm1, [rcx + 16]
   movdqa [rdx], xmm0
@@ -2335,6 +2336,7 @@ end;
 {Moves 48 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned for 32-bit code and 16 byte
 aligned for 64-bit code, and the buffers may not overlap.}
 procedure Move48(const ASource; var ADest; ACount: NativeInt);
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -2351,7 +2353,7 @@ asm
   fistp qword ptr [edx + 8]
   fistp qword ptr [edx]
 {$else}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   movdqa xmm0, [rcx]
   movdqa xmm1, [rcx + 16]
   movdqa xmm2, [rcx + 32]
@@ -2373,6 +2375,7 @@ end;
 {Moves 64 bytes from ASource to ADest.  Both ASource and ADest must be 8 byte aligned for 32-bit code and 16 byte
 aligned for 64-bit code, and the buffers may not overlap.}
 procedure Move64(const ASource; var ADest; ACount: NativeInt);
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -2393,7 +2396,7 @@ asm
   fistp qword ptr [edx + 8]
   fistp qword ptr [edx]
 {$else}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   movdqa xmm0, [rcx]
   movdqa xmm1, [rcx + 16]
   movdqa xmm2, [rcx + 32]
@@ -2625,6 +2628,7 @@ end;
 32-bit code and 16 byte aligned for 64-bit code, and the buffers may not overlap.  ACount will be rounded up to a
 multiple of 16.}
 procedure MoveMultipleOf16(const ASource; var ADest; ACount: NativeInt);
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -2639,7 +2643,7 @@ asm
   add ecx, 16
   js @MoveLoop
 {$else}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   add rcx, r8
   add rdx, r8
   neg r8
@@ -2673,6 +2677,7 @@ end;
 32-bit code and 16 byte aligned for 64-bit code, and the buffers may not overlap.  ACount will be rounded up to a
 multiple of 32.}
 procedure MoveMultipleOf32(const ASource; var ADest; ACount: NativeInt);
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -2691,7 +2696,7 @@ asm
   add ecx, 32
   js @MoveLoop
 {$else}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   add rcx, r8
   add rdx, r8
   neg r8
@@ -2729,6 +2734,7 @@ end;
 32-bit code and 16 byte aligned for 64-bit code, and the buffers may not overlap.  ACount will be rounded up to a
 multiple of 64.}
 procedure MoveMultipleOf64_Small(const ASource; var ADest; ACount: NativeInt);
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -2755,7 +2761,7 @@ asm
   add ecx, 64
   js @MoveLoop
 {$else}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   add rcx, r8
   add rdx, r8
   neg r8
@@ -2801,6 +2807,7 @@ end;
 large blocks on modern CPUs.  If ACount is not a multiple of 64 then at least ACount bytes will be moved, possibly
 more.}
 procedure MoveMultipleOf64_Large(const ASource; var ADest; ACount: NativeInt);
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -2815,9 +2822,15 @@ asm
   pop edi
   pop esi
 {$else}
+{$ifndef FPC}
   .noframe
   .pushnv rsi
   .pushnv rdi
+{$else}
+  {FPC does not know the .pushnv directive:  save and restore the non-volatile registers explicitly.}
+  push rsi
+  push rdi
+{$endif}
   cld
   add r8, 7 //round up the number of qwords
   shr r8, 3
@@ -2825,6 +2838,10 @@ asm
   mov rdi, rdx
   mov rcx, r8
   rep movsq
+{$ifdef FPC}
+  pop rdi
+  pop rsi
+{$endif}
 {$endif}
 {$else}
 var
@@ -4937,7 +4954,7 @@ end;
 function CountTrailingZeros32(AInteger: Integer): Integer;
 asm
 {$ifdef 64Bit}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   mov rax, rcx
 {$endif}
   bsf eax, eax
@@ -6745,10 +6762,21 @@ asm
   pop ebx
 {$else}
   {-------x64 Assembly language codepath--------}
+{$ifndef FPC}
   .pushnv rbx
   .pushnv rsi
   .pushnv rdi
   .params 3
+{$else}
+  {FPC does not know the .pushnv/.params directives:  replicate the exact frame Delphi generates for them - three
+  non-volatile register pushes followed by a 32 byte parameter area for the calls made below.  The total displacement
+  of 56 bytes keeps the [rsp + CMaximumSizeStackOffset] references below valid (they address the register home space
+  of this function's own parameters).}
+  push rbx
+  push rsi
+  push rdi
+  sub rsp, $20
+{$endif}
 
   {rsi = medium block manager, edi = bin number, on stack = optimal block size, on stack = maximum block size}
   mov rsi, rcx
@@ -6764,7 +6792,7 @@ asm
   and ecx, edi
   or eax, -1
   shl eax, cl
-  and eax, dword ptr TMediumBlockManager.MediumBlockBinBitmaps(rsi + rdx * 4)
+  and eax, dword ptr [rsi + rdx * 4 + TMediumBlockManager.MediumBlockBinBitmaps]
   jnz @GotBin
   {There are no suitable free blocks in the group containing AMinimumBlockSizeBinNumber, so get a free block from any
   subsequent group.}
@@ -6775,7 +6803,7 @@ asm
   {Get the first group with large enough blocks in edx}
   bsf edx, edx
   {Get the bin bitmap for the next group with free blocks}
-  mov eax, dword ptr TMediumBlockManager.MediumBlockBinBitmaps(rsi + rdx * 4)
+  mov eax, dword ptr [rsi + rdx * 4 + TMediumBlockManager.MediumBlockBinBitmaps]
 @GotBin:
 
   {Group bitmap is in eax, group number in edx:  Find the first bin with free blocks in the group}
@@ -6785,7 +6813,7 @@ asm
   add eax, edx
 
   {Get the first free block in the bin}
-  mov rdi, qword ptr TMediumBlockManager.FirstFreeBlockInBin(rsi + rax * 8)
+  mov rdi, qword ptr [rsi + rax * 8 + TMediumBlockManager.FirstFreeBlockInBin]
 
   mov rcx, rsi
   mov rdx, rdi
@@ -6804,11 +6832,11 @@ asm
 @DebugInfoOK:
 
   {Get the block size in ebx}
-  movzx ebx, TMediumBlockHeader.MediumBlockSizeMultiple(rdi - CMediumBlockHeaderSize)
+  movzx ebx, word ptr [rdi - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple]
   shl ebx, CMediumBlockAlignmentBits
 
   {Should the block be split?}
-  cmp ebx, [esp + CMaximumSizeStackOffset]
+  cmp ebx, [rsp + CMaximumSizeStackOffset]
   jbe @SecondSplitDone
 
   {Use the optimal block size, second split size in ecx}
@@ -6820,24 +6848,24 @@ asm
   lea rdx, [rdi + rbx]
 
   {Get the span offset multiple of the first split in r9.}
-  movzx r9d, TMediumBlockHeader.MediumBlockSpanOffsetMultiple(rdi - CMediumBlockHeaderSize)
+  movzx r9d, word ptr [rdi - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSpanOffsetMultiple]
 
   {The second split should already be tagged as a free block in the next block's header, but we need to set the size of
   the second split in its own footer.}
-  mov TMediumFreeBlockFooter.MediumFreeBlockSize(rdx + rcx - CMediumFreeBlockFooterSize), ecx
+  mov [rdx + rcx - CMediumFreeBlockFooterSize + TMediumFreeBlockFooter.MediumFreeBlockSize], ecx
   {Set the second split's block size in its header}
   mov eax, ecx
   shr eax, CMediumBlockAlignmentBits
-  mov TMediumBlockHeader.MediumBlockSizeMultiple(rdx - CMediumBlockHeaderSize), ax
+  mov [rdx - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple], ax
   {Set the span offset for the second split.  It is the sum of the offset and size multiples of the first split.}
   mov eax, ebx
   shr eax, CMediumBlockAlignmentBits
   add eax, r9d
-  mov TMediumBlockHeader.MediumBlockSpanOffsetMultiple(rdx - CMediumBlockHeaderSize), ax
+  mov [rdx - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSpanOffsetMultiple], ax
   {Set the block flags for the second split}
-  mov TMediumBlockHeader.BlockStatusFlags(rdx - CMediumBlockHeaderSize), CBlockIsFreeFlag + CIsMediumBlockFlag
+  mov word ptr [rdx - CMediumBlockHeaderSize + TMediumBlockHeader.BlockStatusFlags], CBlockIsFreeFlag + CIsMediumBlockFlag
   {Ensure the second split is not marked as a small block span.}
-  mov TMediumBlockHeader.IsSmallBlockSpan(rdx - CMediumBlockHeaderSize), False
+  mov byte ptr [rdx - CMediumBlockHeaderSize + TMediumBlockHeader.IsSmallBlockSpan], False
 
   {Bin the second split.}
   cmp ecx, CMinimumMediumBlockSize
@@ -6849,17 +6877,24 @@ asm
 
   {Update the flag in the next block to indicate that this block is now in use.  The block size is not stored before
   the header of the next block if it is not free.}
-  mov TMediumBlockHeader.PreviousBlockIsFree(rdi + rbx - CMediumBlockHeaderSize), False
+  mov byte ptr [rdi + rbx - CMediumBlockHeaderSize + TMediumBlockHeader.PreviousBlockIsFree], False
   {Set the block flags}
-  mov TMediumBlockHeader.BlockStatusFlags(rdi - CMediumBlockHeaderSize), CIsMediumBlockFlag
+  mov word ptr [rdi - CMediumBlockHeaderSize + TMediumBlockHeader.BlockStatusFlags], CIsMediumBlockFlag
   {Update the block size.}
   shr ebx, CMediumBlockAlignmentBits
-  mov TMediumBlockHeader.MediumBlockSizeMultiple(rdi - CMediumBlockHeaderSize), bx
+  mov [rdi - CMediumBlockHeaderSize + TMediumBlockHeader.MediumBlockSizeMultiple], bx
 
   mov byte ptr TMediumBlockManager(rsi).MediumBlockManagerLocked, 0
 
   mov rax, rdi
 
+{$ifdef FPC}
+  {Unwind the manually created frame (see the prologue above).}
+  add rsp, $20
+  pop rdi
+  pop rsi
+  pop rbx
+{$endif}
 {$endif}
 {$else}
 var
@@ -7943,6 +7978,7 @@ end;
 {Attempts to split off a small block from the sequential feed span for the arena.  Returns the block on success, nil if
 there is no available sequential feed block.  The arena does not have to be locked.}
 function FastMM_GetMem_GetSmallBlock_TryGetBlockFromSequentialFeedSpan(APSmallBlockManager: PSmallBlockManager): Pointer;
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -7993,7 +8029,7 @@ asm
   pop ebx
 {$else}
   {--------x64 Assembly language codepath---------}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
 
 @TrySequentialFeedLoop:
 
@@ -8650,6 +8686,7 @@ end;
 {--------------------------------------------------------}
 
 function FastMM_GetMem(ASize: NativeInt): Pointer;
+{$if defined(FPC) and (not defined(PurePascal))}assembler; nostackframe;{$ifend}
 {$ifndef PurePascal}
 asm
 {$ifdef X86ASM}
@@ -8693,18 +8730,27 @@ asm
   mov ecx, eax
   jmp FastMM_GetMem_GetMediumBlock
 {$else}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   {--------x64 Assembly language codepath---------}
   cmp rcx, (CMaximumSmallBlockSize - CSmallBlockHeaderSize)
   ja @NotASmallBlock
   {Small block:  Get the small block manager index in ecx}
   add ecx, 1
   shr ecx, CSmallBlockGranularityBits
+  {FPC requires the rip-relative form spelled out;  Delphi assembles the plain symbol reference rip-relatively.}
+{$ifdef FPC}
+  lea rdx, [rip + SmallBlockTypeLookup]
+{$else}
   lea rdx, SmallBlockTypeLookup
+{$endif}
   movzx ecx, byte ptr [rdx + rcx]
   {Get a pointer to the small block manager for arena 0 in rcx}
   shl rcx, CSmallBlockManagerSizeBits
+{$ifdef FPC}
+  lea rdx, [rip + SmallBlockManagers]
+{$else}
   lea rdx, SmallBlockManagers
+{$endif}
   add rcx, rdx
   jmp FastMM_GetMem_GetSmallBlock
 @NotASmallBlock:
@@ -9051,7 +9097,7 @@ asm
   jmp HandleInvalidFreeMemOrReallocMem
 {$else}
   {--------x64 Assembly language codepath---------}
-  .noframe
+  {$ifndef FPC}.noframe{$endif}
   {Get the block flags in r8}
   movzx r8d, word ptr [rcx - CBlockStatusFlagsSize]
 
