@@ -10,13 +10,24 @@ var
   GMailbox: array[0..63] of Pointer;
   GDone: Integer;
 
+{Pointer-breiter atomarer Austausch - noetig, damit der Test auch unter dcc64 kompiliert.
+ (NativeUInt kommt unter Delphi 7 aus dem Kompatibilitaets-Typ im FastMM5-Interface.)}
+function XchgPtr(var ATarget: Pointer; AValue: Pointer): Pointer;
+begin
+{$ifdef WIN64}
+  Result := Pointer(InterlockedExchange64(Int64(ATarget), Int64(AValue)));
+{$else}
+  Result := Pointer(InterlockedExchange(Integer(ATarget), Integer(AValue)));
+{$endif}
+end;
+
 function StressThread(AParam: Pointer): Integer; stdcall;
 var
   LSeed: Cardinal;
   LIter, LSize, LSlot: Integer;
   P, LSwapped: Pointer;
 begin
-  LSeed := Cardinal(AParam) * $9E3779B9 + 1;
+  LSeed := Cardinal(NativeUInt(AParam)) * $9E3779B9 + 1;
   for LIter := 1 to GIters do
   begin
     LSeed := LSeed xor (LSeed shl 13);
@@ -28,7 +39,7 @@ begin
     if GCrossFree and (LSeed and 7 = 0) then
     begin
       LSlot := (LSeed shr 16) and 63;
-      LSwapped := Pointer(InterlockedExchange(Integer(GMailbox[LSlot]), Integer(P)));
+      LSwapped := XchgPtr(GMailbox[LSlot], P);
       if LSwapped <> nil then
         FreeMem(LSwapped);
     end

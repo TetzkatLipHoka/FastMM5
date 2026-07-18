@@ -1,25 +1,42 @@
 program FastMM5Diag_SSE2Check;
 {Verifiziert den SSE2-Status des Builds:
    1. Assembliert der Compiler movdqu korrekt? (Opcode-Bytes der Testroutine pruefen)
-   2. Meldet die CPUID-Erkennung SSE2? (gleiche Logik wie Compat_TestSSE in FastMM5.pas)
+   2. Meldet die CPUID-Erkennung SSE2? (gleiche Logik wie Compat_TestSSE in FastMM5.pas;
+      unter Win64 ist CPUID immer vorhanden)
    3. Kopiert die SSE2-Move-Routine korrekt? (Muster-Roundtrip ueber einen Realloc-Upsize,
       der intern die gewaehlte UpsizeMoveProcedure benutzt)
- Kompilieren wie die anderen Diag-Tests, siehe README.}
+ Kompilierbar mit dcc32 (ab Delphi 7) und dcc64.  Kompilieren wie die anderen Diag-Tests, siehe README.}
 {$APPTYPE CONSOLE}
 
 uses
   FastMM5, SysUtils;
 
-{Lokale Kopie der movdqu-Sequenz aus Move16_x86_SSE2 - zum Pruefen der vom Compiler erzeugten Opcodes.}
+{Lokale Kopie der movdqu-Sequenz aus den SSE2-Move-Routinen - zum Pruefen der vom Compiler erzeugten Opcodes.
+ Unter Win64 erzwingt .noframe, dass die Routine direkt mit dem movdqu beginnt.}
 procedure LocalMove16SSE2(const ASource; var ADest; ACount: Integer);
 asm
+{$ifdef WIN64}
+  .noframe
+  movdqu xmm0, [rcx]
+  movdqu [rdx], xmm0
+{$else}
   movdqu xmm0, [eax]
   movdqu [edx], xmm0
+{$endif}
 end;
 
 {CPUID-SSE2-Erkennung, identisch zur Logik von Compat_TestSSE in FastMM5.pas.}
 function LocalTestSSE2: Boolean;
 asm
+{$ifdef WIN64}
+  .noframe
+  push rbx
+  mov eax, 1
+  cpuid
+  test edx, $4000000
+  setnz al
+  pop rbx
+{$else}
   push ebx
   pushfd
   pop eax
@@ -40,6 +57,7 @@ asm
 @NoCPUID:
   xor eax, eax
   pop ebx
+{$endif}
 end;
 
 var
@@ -57,28 +75,33 @@ begin
 end;
 
 const
-  {Erwartete Encodings: movdqu xmm0,[eax] = F3 0F 6F 00 / movdqu [edx],xmm0 = F3 0F 7F 02}
-  CExpectedOpcodes: array[0..7] of Byte = ($F3, $0F, $6F, $00, $F3, $0F, $7F, $02);
+  {Erwartete Encodings (die ModRM-Bytes unterscheiden sich je nach Registersatz):
+   Win32: movdqu xmm0,[eax] = F3 0F 6F 00 / movdqu [edx],xmm0 = F3 0F 7F 02
+   Win64: movdqu xmm0,[rcx] = F3 0F 6F 01 / movdqu [rdx],xmm0 = F3 0F 7F 02}
+  CExpectedOpcodes: array[0..7] of Byte =
+    {$ifdef WIN64}($F3, $0F, $6F, $01, $F3, $0F, $7F, $02)
+    {$else}($F3, $0F, $6F, $00, $F3, $0F, $7F, $02){$endif};
 
 var
-  LPCode: PByte;
+  LPCode: PAnsiChar;
   i: Integer;
-  LOpcodesOK: Boolean;
+  LOK: Boolean;
   LSrc, LDst: array[0..15] of Byte;
   p: Pointer;
+  LPBytes: PAnsiChar;
   LSizes: array[0..3] of Integer;
   s: Integer;
 begin
   LFails := 0;
-  WriteLn('SSE2-Status unter ', {$ifdef VER150}'Delphi 7'{$else}'diesem Compiler'{$endif}, ':');
+  WriteLn('SSE2-Status unter ', {$ifdef VER150}'Delphi 7'{$else}{$ifdef WIN64}'diesem Compiler (Win64)'{$else}'diesem Compiler (Win32)'{$endif}{$endif}, ':');
 
   {1. Opcode-Pruefung: hat der eingebaute Assembler movdqu korrekt encodiert?}
-  LPCode := @LocalMove16SSE2;
-  LOpcodesOK := True;
+  LPCode := PAnsiChar(@LocalMove16SSE2);
+  LOK := True;
   for i := 0 to High(CExpectedOpcodes) do
-    if PByte(Integer(LPCode) + i)^ <> CExpectedOpcodes[i] then
-      LOpcodesOK := False;
-  Check(LOpcodesOK, 'movdqu-Opcodes byte-korrekt assembliert');
+    if Byte(LPCode[i]) <> CExpectedOpcodes[i] then
+      LOK := False;
+  Check(LOK, 'movdqu-Opcodes byte-korrekt assembliert');
 
   {2. Laufzeit-Erkennung}
   Check(LocalTestSSE2, 'CPUID meldet SSE2 (auf dieser Maschine erwartet)');
@@ -88,11 +111,11 @@ begin
     LSrc[i] := Byte(i * 7 + 3);
   FillChar(LDst, SizeOf(LDst), 0);
   LocalMove16SSE2(LSrc, LDst, 16);
-  LOpcodesOK := True;
+  LOK := True;
   for i := 0 to 15 do
     if LDst[i] <> LSrc[i] then
-      LOpcodesOK := False;
-  Check(LOpcodesOK, 'movdqu-Kopie inhaltlich korrekt');
+      LOK := False;
+  Check(LOK, 'movdqu-Kopie inhaltlich korrekt');
 
   {4. End-to-End: Realloc-Upsize durch FastMM benutzt die gewaehlte Move-Routine (bei SSE2-CPU die
    SSE2-Variante).  Muster muss die Kette von Upsizes ueberleben.}
@@ -100,15 +123,17 @@ begin
   for s := 0 to High(LSizes) do
   begin
     GetMem(p, LSizes[s]);
+    LPBytes := p;
     for i := 0 to LSizes[s] - 1 do
-      PByte(Integer(p) + i)^ := Byte(i xor $5A);
+      LPBytes[i] := AnsiChar(Byte(i xor $5A));
     ReallocMem(p, LSizes[s] * 40);  {Upsize erzwingt Kopie in groessere Klasse}
-    LOpcodesOK := True;
+    LPBytes := p;
+    LOK := True;
     for i := 0 to LSizes[s] - 1 do
-      if PByte(Integer(p) + i)^ <> Byte(i xor $5A) then
-        LOpcodesOK := False;
+      if Byte(LPBytes[i]) <> Byte(i xor $5A) then
+        LOK := False;
     FreeMem(p);
-    Check(LOpcodesOK, Format('Realloc-Upsize aus %d-Byte-Klasse erhaelt Inhalt', [LSizes[s] + 2]));
+    Check(LOK, Format('Realloc-Upsize aus %d-Byte-Klasse erhaelt Inhalt', [LSizes[s] + 2]));
   end;
 
   if LFails = 0 then
