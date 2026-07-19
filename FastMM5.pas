@@ -485,6 +485,7 @@ const
   visible in the interface section.}
   CDebugBlockHeaderSize = SizeOf(TFastMM_DebugBlockHeader);
   CDebugBlockFooterCheckSumSize = SizeOf(Cardinal);
+  CDebugBlockFooterReservedSpaceForFreeMediumBlock = SizeOf(Integer);
 
 {$ifdef FPCDIAG}
 var
@@ -548,6 +549,10 @@ type
 
   TFastMM_MinimumAddressAlignment = (maa8Bytes, maa16Bytes, maa32Bytes, maa64Bytes);
   TFastMM_MinimumAddressAlignmentSet = set of TFastMM_MinimumAddressAlignment;
+
+  {Options that may be enabled in debug mode.}
+  TFastMM_DebugModeOption = (dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks);
+  TFastMM_DebugModeOptions = set of TFastMM_DebugModeOption;
 
   {The formats in which text files (e.g. the event log) may be written.  Controlled via the FastMM_TextFileEncoding
   variable.}
@@ -825,6 +830,13 @@ function FastMM_ExitDebugMode: Boolean;
 {Returns True if debug mode is currently active, i.e. FastMM_EnterDebugMode has been called more times than
 FastMM_ExitDebugMode.}
 function FastMM_DebugModeActive: Boolean;
+
+{Gets and sets the options that should apply when debug mode is active, i.e. FastMM_DebugModeActive = True.  The initial
+default is [dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks].  If memory usage is excessive when debug mode
+is enabled consider removing the dmoNeverMergeFreeMediumBlocks option, and if that is not sufficient to reduce memory
+pressure then the dmoNeverFreeSmallBlockSpans option as well.}
+function FastMM_GetDebugModeOptions: TFastMM_DebugModeOptions;
+procedure FastMM_SetDebugModeOptions(ADebugModeOptions: TFastMM_DebugModeOptions);
 
 {Enables/disables the erasure of the content of newly allocated blocks.  Calls may be nested, in which case erasure is
 only disabled when the number of FastMM_EndEraseAllocatedBlockContent calls equal the number of
@@ -1976,6 +1988,11 @@ type
     procedure Unlock;
   end;
 
+  {-------OpenOrCreateTextFile options--------}
+
+  {What to do if the text file already exists.}
+  TTextFileAlreadyExistsAction = (faeDoNothing, faeAddLineBreak, faeTruncateFile);
+
 const
   {Structure size constants}
   CBlockStatusFlagsSize = SizeOf(TBlockStatusFlags);
@@ -2163,14 +2180,25 @@ var
   {The current installation state of FastMM.}
   CurrentInstallationState: TFastMM_MemoryManagerInstallationState;
 
-  {The difference between the number of times FastMM_EnterDebugMode has been called vs FastMM_ExitDebugMode.}
-  DebugModeCounter: Integer;
+  {Mode switch counters:  Used to keep track of the difference in the number of Enter/Exit or Begin/End calls for each
+  mode.}
+  DebugModeCounter: Integer; //FastMM_EnterDebugMode less FastMM_ExitDebugMode calls
+  EraseAllocatedBlockContentCounter: Integer; //FastMM_BeginEraseAllocatedBlockContent less FastMM_EndEraseAllocatedBlockContent calls
+  EraseFreedBlockContentCounter: Integer; //FastMM_BeginEraseFreedBlockContent less FastMM_EndEraseFreedBlockContent calls
 
-  {The difference between the number of times FastMM_BeginEraseAllocatedBlockContent has been called vs FastMM_EndEraseAllocatedBlockContent.}
-  EraseAllocatedBlockContentCounter: Integer;
+  {Boolean flags indicating which modes are currently enabled.  A transition from 0->1 or 1->0 in the counters above
+  will toggle the corresponding variables if the memory manager could be switched successfully.}
+  DebugModeActive: Boolean;
+  EraseAllocatedBlockContentActive: Boolean;
+  EraseFreedBlockContentActive: Boolean;
 
-  {The difference between the number of times FastMM_BeginEraseFreedBlockContent has been called vs FastMM_EndEraseFreedBlockContent.}
-  EraseFreedBlockContentCounter: Integer;
+  {The options that will be enabled while debug mode is active (DebugModeActive = True).}
+  DebugModeOptions: TFastMM_DebugModeOptions = [dmoNeverFreeSmallBlockSpans, dmoNeverMergeFreeMediumBlocks];
+
+  {Runtime configuration options that are derived from DebugModeActive and DebugModeOptions.  These are set by the
+  ApplyDebugModeOptions call.}
+  MayFreeSmallBlockSpans: Boolean = True;
+  MayMergeFreeMediumBlocks: Boolean = True;
 
   {The number of entries in stack traces in debug mode.}
   DebugMode_StackTrace_EntryCount: Byte;
@@ -3483,14 +3511,20 @@ begin
 end;
 
 {Opens the given file for writing, returning the file handle.  If the file does not exist it will be created.  The file
-pointer will be set to the current end of the file.}
-function OS_OpenOrCreateFile(APFileName: PWideChar; var AFileHandle: THandle): Boolean;
+pointer will be set to the current end of the file.  If ATruncateExistingFile = True then the file will be truncated if
+it already existed.}
+function OS_OpenOrCreateFile(APFileName: PWideChar; var AFileHandle: THandle; ATruncateExistingFile: Boolean): Boolean;
 var
+  LCreationDisposition: Cardinal;
   LNewPos: Int64;
 begin
   {Try to open/create the file in read/write mode.}
-  AFileHandle := CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil, OPEN_ALWAYS,
-    FILE_ATTRIBUTE_NORMAL, 0);
+  if ATruncateExistingFile then
+    LCreationDisposition := CREATE_ALWAYS
+  else
+    LCreationDisposition := OPEN_ALWAYS;
+  AFileHandle := CreateFileW(APFileName, GENERIC_READ or GENERIC_WRITE, FILE_SHARE_READ, nil,
+    LCreationDisposition, FILE_ATTRIBUTE_NORMAL, 0);
   if AFileHandle = INVALID_HANDLE_VALUE then
     begin
     Result := False;
@@ -3642,7 +3676,7 @@ begin
     Dec(Result);
 end;
 
-function OpenOrCreateTextFile(APFileName: PWideChar; AAddLineBreakToExistingFile: Boolean;
+function OpenOrCreateTextFile(APFileName: PWideChar; AExistingFileAction: TTextFileAlreadyExistsAction;
   var AFileHandle: THandle): Boolean;
 const
   CUTF8_BOM: Cardinal = $BFBBEF;
@@ -3650,15 +3684,15 @@ const
   CLineBreakUTF8: Word = $0A0D;
   CLineBreakUTF16: Cardinal = $000A000D;
 var
-  LFileExisted: Boolean;
+  LFileHasExistingContent: Boolean;
 begin
-  LFileExisted := OS_FileExists(APFileName);
+  LFileHasExistingContent := (AExistingFileAction <> faeTruncateFile) and OS_FileExists(APFileName);
 
-  if OS_OpenOrCreateFile(APFileName, AFileHandle) then
+  if OS_OpenOrCreateFile(APFileName, AFileHandle, AExistingFileAction = faeTruncateFile) then
   begin
-    if LFileExisted then
+    if LFileHasExistingContent then
     begin
-      if AAddLineBreakToExistingFile then
+      if AExistingFileAction = faeAddLineBreak then
       begin
         if FastMM_TextFileEncoding in [teUTF8, teUTF8_BOM] then
           OS_WriteFile(AFileHandle, @CLineBreakUTF8, SizeOf(CLineBreakUTF8))
@@ -3845,6 +3879,14 @@ var
   LPAnsiString: PAnsiChar;
   LPUnicodeString: PWideChar;
 begin
+  {The block must have space for at least the string header and an additional two bytes (minimum of one character and
+  the trailing #0).}
+  if AAvailableSpaceInBlock < (SizeOf(StrRec) + 2) then
+  begin
+    Result := sdtNotAString;
+    Exit;
+  end;
+
   {Check that the reference count is within a reasonable range}
   if PStrRec(APMemoryBlock).refCnt > CMaxRefCount then
     begin
@@ -4587,7 +4629,7 @@ end;
 
 function OpenEventLogFile: Boolean;
 begin
-  Result := EventLogFileIsOpen or OpenOrCreateTextFile(@EventLogFilename, True, EventLogFileHandle);
+  Result := EventLogFileIsOpen or OpenOrCreateTextFile(@EventLogFilename, faeAddLineBreak, EventLogFileHandle);
 end;
 
 procedure CloseEventLogFile;
@@ -4995,8 +5037,11 @@ end;
 {Calculates the size of a debug block footer, given the number of stack trace entries.}
 function CalculateDebugBlockFooterSize(AStackTraceDepth: Byte): NativeInt; {$IF CompilerVersion >= 18}inline;{$IFEND}
 begin
-  {The debug footer consists of a dword checksum, followed by the allocation and free stack traces.}
-  Result := CDebugBlockFooterCheckSumSize + AStackTraceDepth * (2 * SizeOf(Pointer));
+  {The debug footer consists of a dword checksum, followed by the allocation and free stack traces and finally a
+  reserved dword to ensure there is enough space for free medium blocks to store their size immediately before the
+  header of the next block.}
+  Result := AStackTraceDepth * (2 * SizeOf(Pointer))
+    + (CDebugBlockFooterCheckSumSize + CDebugBlockFooterReservedSpaceForFreeMediumBlock);
 end;
 
 procedure LogDebugBlockHeaderInvalid(APDebugBlockHeader: PFastMM_DebugBlockHeader);
@@ -5421,7 +5466,7 @@ begin
 
     {Move the debug footer just beyond the new user size.}
     LPNewFooter := LPActualBlock.DebugFooterPtr;
-    System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize);
+    System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize - CDebugBlockFooterReservedSpaceForFreeMediumBlock);
 
     {Restore the debug information flag.}
     SetBlockHasDebugInfo(LPActualBlock, True);
@@ -5445,7 +5490,7 @@ begin
       {Move the debug footer over to the end of the user data.}
       LPOldFooter := LPActualBlock.DebugFooterPtr;
       LPNewFooter := PFastMM_DebugBlockHeader(Result).DebugFooterPtr;
-      System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize);
+      System.Move(LPOldFooter^, LPNewFooter^, LDebugFooterSize - CDebugBlockFooterReservedSpaceForFreeMediumBlock);
 
       {Free the old block.}
       FastMM_FreeMem_FreeDebugBlock(APointer);
@@ -5739,8 +5784,19 @@ begin
     begin
       LOldPendingFreeList := LPLargeBlockManager.PendingFreeList;
       PPointer(APLargeBlock)^ := LOldPendingFreeList;
-      if AtomicCmpExchange(LPLargeBlockManager.PendingFreeList, APLargeBlock, LOldPendingFreeList) = LOldPendingFreeList then
-        Break;
+
+      {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+      list will still not be caught, but this may help and it is cheap.}
+      if LOldPendingFreeList <> APLargeBlock then
+      begin
+        if AtomicCmpExchange(LPLargeBlockManager.PendingFreeList, APLargeBlock, LOldPendingFreeList) = LOldPendingFreeList then
+          Break;
+      end
+      else
+      begin
+        System.Error(reInvalidPtr);
+        Break; //Optimization - the compiler does not know that System.Error does not return
+      end;
     end;
 
     Result := 0;
@@ -5918,10 +5974,8 @@ begin
   if ABlockIsFree then
   begin
 
-    if ABlockHasDebugInfo then
-      PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.BlockStatusFlags := CHasDebugInfoFlag + CBlockIsFreeFlag + CIsMediumBlockFlag
-    else
-      PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.BlockStatusFlags := CBlockIsFreeFlag + CIsMediumBlockFlag;
+    PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.BlockStatusFlags := Ord(ABlockHasDebugInfo) * CHasDebugInfoFlag
+      + (CBlockIsFreeFlag + CIsMediumBlockFlag);
 
     LPNextBlock := Pointer(PAnsiChar(APMediumBlock) + (ABlockSize));
     {If the block is free then the size must also be stored just before the header of the next block.}
@@ -5934,10 +5988,8 @@ begin
   else
   begin
 
-    if ABlockHasDebugInfo then
-      PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.BlockStatusFlags := CHasDebugInfoFlag + CIsMediumBlockFlag
-    else
-      PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.BlockStatusFlags := CIsMediumBlockFlag;
+    PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.BlockStatusFlags := Ord(ABlockHasDebugInfo) * CHasDebugInfoFlag
+      + CIsMediumBlockFlag;
 
     LPNextBlock := Pointer(PAnsiChar(APMediumBlock) + (ABlockSize));
     {Update the flag in the next block to indicate that this block is in use.  The block size is not stored before
@@ -6054,7 +6106,7 @@ begin
 
     {There's no need to update the ABA counter, since the medium block manager is locked and no other thread can thus
     change the sequential feed span.}
-    if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue, 0,
+    if AtomicCmpExchange(APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue, CMediumBlockSpanHeaderSize,
       LPreviousLastSequentialFeedBlockOffset) = LPreviousLastSequentialFeedBlockOffset then
     begin
       LSequentialFeedFreeSize := LPreviousLastSequentialFeedBlockOffset - CMediumBlockSpanHeaderSize;
@@ -6092,69 +6144,6 @@ begin
 
 end;
 
-{In debug mode free medium blocks are not coalesced, so the size of a free block can never equal the size of the span
-and an explicit scan of all the blocks in the span is required in order to determine whether the entire span is free.
-Returns True if every block in the span is flagged as free.  The medium block manager must be locked.}
-function MediumBlockSpanAllBlocksFree(APMediumBlockManager: PMediumBlockManager;
-  APMediumBlockSpan: PMediumBlockSpanHeader): Boolean;
-var
-  LPBlock: Pointer;
-  LBlockSize, LOffset: Integer;
-begin
-  {The current sequential feed span contains an unfed region without valid block headers, so it cannot be considered
-  fully free until it has been fed to the end.}
-  if (APMediumBlockManager.SequentialFeedMediumBlockSpan = APMediumBlockSpan)
-    and (APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue > CMediumBlockSpanHeaderSize) then
-  begin
-    Result := False;
-    Exit;
-  end;
-
-  LOffset := CMediumBlockSpanHeaderSize;
-  while LOffset < APMediumBlockSpan.SpanSize do
-  begin
-    LPBlock := Pointer(PAnsiChar(APMediumBlockSpan) + LOffset);
-    if not BlockIsFree(LPBlock) then
-    begin
-      Result := False;
-      Exit;
-    end;
-    LBlockSize := GetMediumBlockSize(LPBlock);
-    {Guard against a corrupted block header causing an endless loop.}
-    if LBlockSize <= 0 then
-    begin
-      Result := False;
-      Exit;
-    end;
-    Inc(LOffset, LBlockSize);
-  end;
-
-  Result := True;
-end;
-
-{Removes all the binned free blocks of the span from their bins, in preparation for releasing the span back to the
-operating system.  All blocks in the span must be free (see MediumBlockSpanAllBlocksFree).  Free blocks smaller than
-CMinimumMediumBlockSize are never binned, and APSkipBlock (the block currently being freed) has not been binned yet.
-The medium block manager must be locked.}
-procedure RemoveMediumBlockSpanBlocksFromBins(APMediumBlockManager: PMediumBlockManager;
-  APMediumBlockSpan: PMediumBlockSpanHeader; APSkipBlock: Pointer);
-var
-  LPBlock: Pointer;
-  LBlockSize, LOffset: Integer;
-begin
-  LOffset := CMediumBlockSpanHeaderSize;
-  while LOffset < APMediumBlockSpan.SpanSize do
-  begin
-    LPBlock := Pointer(PAnsiChar(APMediumBlockSpan) + LOffset);
-    LBlockSize := GetMediumBlockSize(LPBlock);
-    if LBlockSize <= 0 then
-      Break;
-    if (LPBlock <> APSkipBlock) and (LBlockSize >= CMinimumMediumBlockSize) then
-      RemoveMediumFreeBlockFromBin(APMediumBlockManager, LPBlock);
-    Inc(LOffset, LBlockSize);
-  end;
-end;
-
 {Subroutine for FastMM_FreeMem_FreeMediumBlock.  The medium block manager must already be locked.  Optionally unlocks the
 medium block manager before exit.  Returns 0 on success, -1 on failure.}
 function FastMM_FreeMem_InternalFreeMediumBlock_ManagerAlreadyLocked(APMediumBlockManager: PMediumBlockManager;
@@ -6163,7 +6152,6 @@ var
   LPPreviousMediumBlockSpan, LPNextMediumBlockSpan: PMediumBlockSpanHeader;
   LBlockSize, LNextBlockSize, LPreviousBlockSize: Integer;
   LPNextMediumBlock: Pointer;
-  LDebugModeActive, LEntireSpanFree: Boolean;
 {$ifdef FPCDIAG}
   FPCDIAG_MemInfo: TMemoryBasicInformation;
 {$endif}
@@ -6200,56 +6188,45 @@ begin
   end;
 {$endif}
 
-  {Snapshot the debug mode state:  Another thread may toggle debug mode while this call is in progress, and the
-  bin management below has to be consistent with the choice made here.}
-  LDebugModeActive := DebugModeCounter > 0;
-
-  if not LDebugModeActive then
+  {Combine with the next block, if it is free.}
+  LPNextMediumBlock := Pointer(PAnsiChar(APMediumBlock) + LBlockSize);
+  if BlockIsFree(LPNextMediumBlock) then
   begin
-    {Combine with the next block, if it is free.}
-    LPNextMediumBlock := Pointer(PAnsiChar(APMediumBlock) + LBlockSize);
-    if BlockIsFree(LPNextMediumBlock) then
+    LNextBlockSize := GetMediumBlockSize(LPNextMediumBlock);
+
+    {In debug mode medium blocks are normally not merged with adjacent free blocks, but there is one exception:  If the
+    next block is below the binnable size then we need to reclaim it since (a) otherwise the application will never be
+    able to use that space again, and (b) it was split off from the end of a block (this one or a prior superblock of
+    it) so it cannot contain debug information.}
+    if MayMergeFreeMediumBlocks or (LNextBlockSize < CMinimumMediumBlockSize) then
     begin
-      LNextBlockSize := GetMediumBlockSize(LPNextMediumBlock);
+      {Merge the next block into this one.}
       Inc(LBlockSize, LNextBlockSize);
       if LNextBlockSize >= CMinimumMediumBlockSize then
         RemoveMediumFreeBlockFromBin(APMediumBlockManager, LPNextMediumBlock);
     end;
-
-    {Combine with the previous block, if it is free.}
-    if PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.PreviousBlockIsFree then
-    begin
-      LPreviousBlockSize := PMediumFreeBlockFooter(PAnsiChar(APMediumBlock) - SizeOf(TMediumFreeBlockFooter))^.MediumFreeBlockSize;
-      {This is the new current block}
-      APMediumBlock := Pointer(PAnsiChar(APMediumBlock) - LPreviousBlockSize);
-
-      Inc(LBlockSize, LPreviousBlockSize);
-      if LPreviousBlockSize >= CMinimumMediumBlockSize then
-        RemoveMediumFreeBlockFromBin(APMediumBlockManager, APMediumBlock);
-    end;
-
-    {Outside of debug mode medium blocks are combined, so debug info will be lost.}
-    SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock, LBlockSize, True, False);
-
-    {With coalescing the entire span is free when the combined block spans it completely.}
-    LEntireSpanFree := LBlockSize = (APMediumBlockSpan.SpanSize - CMediumBlockSpanHeaderSize);
-
-  end
-  else
-  begin
-    {Medium blocks are not coalesced in debug mode, so just flag the block as free and leave the debug info flag as-is.}
-    SetBlockIsFreeFlag(APMediumBlock, True);
-
-    {Without coalescing the block size can never span the entire span, so all the blocks in the span have to be
-    checked explicitly.  Without this check spans would never be released back to the operating system in debug mode,
-    causing unbounded growth of the committed address space under multithreaded churn.}
-    LEntireSpanFree := MediumBlockSpanAllBlocksFree(APMediumBlockManager, APMediumBlockSpan);
   end;
+
+  {Combine with the previous block, if it is free and we're outside debug mode.}
+  if PMediumBlockHeader(PAnsiChar(APMediumBlock) - SizeOf(TMediumBlockHeader))^.PreviousBlockIsFree
+    and MayMergeFreeMediumBlocks then
+  begin
+    LPreviousBlockSize := PMediumFreeBlockFooter(PAnsiChar(APMediumBlock) - SizeOf(TMediumFreeBlockFooter))^.MediumFreeBlockSize;
+
+    {Merge this block into the previous one.  The previous block becomes the new current block.}
+    APMediumBlock := Pointer(PAnsiChar(APMediumBlock) - LPreviousBlockSize);
+    Inc(LBlockSize, LPreviousBlockSize);
+    if LPreviousBlockSize >= CMinimumMediumBlockSize then
+      RemoveMediumFreeBlockFromBin(APMediumBlockManager, APMediumBlock);
+  end;
+
+  {Flag this block as free, keeping the debug info (if there is any).}
+  SetMediumBlockHeader_SetSizeAndFlags(APMediumBlock, LBlockSize, True, BlockHasDebugInfo(APMediumBlock));
 
   {Is the entire medium block span free?  Normally the span will be freed, but if there is not a lot of space left in
   the sequential feed span and the largest free block bin is empty then the block is binned instead (if allowed by the
   optimization strategy).}
-  if (not LEntireSpanFree)
+  if (LBlockSize <> (APMediumBlockSpan.SpanSize - CMediumBlockSpanHeaderSize))
     or ((OptimizationStrategy <> mmosOptimizeForLowMemoryUsage)
       and (APMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue < CMaximumMediumBlockSize)
       and (APMediumBlockManager.MediumBlockBinBitmaps[CMediumBlockBinGroupCount - 1] and (1 shl 31) = 0)) then
@@ -6264,11 +6241,6 @@ begin
   end
   else
   begin
-    {In debug mode the other free blocks in the span are still in the bins and must be removed before the span may be
-    released.  (The block being freed in this call has not been binned.)}
-    if LDebugModeActive then
-      RemoveMediumBlockSpanBlocksFromBins(APMediumBlockManager, APMediumBlockSpan, APMediumBlock);
-
     {Remove this medium block span from the linked list}
     LPPreviousMediumBlockSpan := APMediumBlockSpan.PreviousMediumBlockSpanHeader;
     LPNextMediumBlockSpan := APMediumBlockSpan.NextMediumBlockSpanHeader;
@@ -6347,8 +6319,20 @@ begin
     begin
       LFirstPendingFreeBlock := LPMediumBlockManager.PendingFreeList;
       PPointer(APMediumBlock)^ := LFirstPendingFreeBlock;
-      if AtomicCmpExchange(LPMediumBlockManager.PendingFreeList, APMediumBlock, LFirstPendingFreeBlock) = LFirstPendingFreeBlock then
-        Break;
+
+      {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+      list will still not be caught, but this may help and it is cheap.}
+      if LFirstPendingFreeBlock <> APMediumBlock then
+      begin
+        if AtomicCmpExchange(LPMediumBlockManager.PendingFreeList, APMediumBlock, LFirstPendingFreeBlock) = LFirstPendingFreeBlock then
+          Break;
+      end
+      else
+      begin
+        System.Error(reInvalidPtr);
+        Break; //Optimization - the compiler does not know that System.Error does not return
+      end;
+
     end;
 
     Result := 0;
@@ -7694,8 +7678,8 @@ asm
 
 @SpanIsEmpty:
   {In debug mode spans are never freed.}
-  cmp DebugModeCounter, 0
-  jg @DoNotFreeSpan
+  cmp MayFreeSmallBlockSpans, 1
+  jne @DoNotFreeSpan
   {Remove this span from the circular linked list of partially free spans for the block type.}
   mov edx, TSmallBlockSpanHeader(eax).PreviousPartiallyFreeSpan
   mov ebx, TSmallBlockSpanHeader(eax).NextPartiallyFreeSpan
@@ -7727,7 +7711,7 @@ begin
   {Is the entire span now free? -> Free it, unless debug mode is active.  BlocksInUse is set to the maximum that will
   fit in the span when the span is added as the sequential feed span, so this can only hit zero once all the blocks have
   been fed sequentially and subsequently freed.}
-  if (APSmallBlockSpan.BlocksInUse <> 0) or (DebugModeCounter > 0) then
+  if (APSmallBlockSpan.BlocksInUse <> 0) or MayFreeSmallBlockSpans then
   begin
     LOldFirstFreeBlock := APSmallBlockSpan.FirstFreeBlock;
 
@@ -7845,8 +7829,20 @@ begin
     begin
       LOldFirstFreeBlock := LPSmallBlockManager.PendingFreeList;
       PPointer(APSmallBlock)^ := LOldFirstFreeBlock;
-      if AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, APSmallBlock, LOldFirstFreeBlock) = LOldFirstFreeBlock then
-        Break;
+
+      {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+      list will still not be caught, but this may help and it is cheap.}
+      if LOldFirstFreeBlock <> APSmallBlock then
+      begin
+        if AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, APSmallBlock, LOldFirstFreeBlock) = LOldFirstFreeBlock then
+          Break;
+      end
+      else
+      begin
+        System.Error(reInvalidPtr);
+        Break; //The compiler does not know that System.Error does not return
+      end;
+
     end;
     Result := 0;
   end;
@@ -8884,6 +8880,15 @@ asm
 @ManagerCurrentlyLocked:
   mov eax, TSmallBlockManager(esi).PendingFreeList
   mov [edx], eax
+
+  {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+  list will still not be caught, but this may help and it is cheap.}
+  cmp eax, edx
+  jne @NotDoubleFreeAttempt
+  mov al, reInvalidPtr
+  call System.Error
+@NotDoubleFreeAttempt:
+
   lock cmpxchg TSmallBlockManager(esi).PendingFreeList, edx
   jne @ManagerCurrentlyLocked
 
@@ -8969,6 +8974,15 @@ asm
 @ManagerCurrentlyLocked:
   mov rax, TSmallBlockManager(rsi).PendingFreeList
   mov [rdx], rax
+
+  {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
+  list will still not be caught, but this may help and it is cheap.}
+  cmp rax, rdx
+  jne @NotDoubleFreeAttempt
+  mov cl, reInvalidPtr
+  call System.Error
+@NotDoubleFreeAttempt:
+
   lock cmpxchg TSmallBlockManager(rsi).PendingFreeList, rdx
   jne @ManagerCurrentlyLocked
 
@@ -9705,32 +9719,8 @@ begin
 
           if LPMediumBlockManager.SequentialFeedMediumBlockSpan = LPMediumBlockSpan then
           begin
+            {If the sequential feed span is set then the sequential feed offset can also be assumed to be valid.}
             LBlockOffsetFromMediumSpanStart := LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue;
-            if LBlockOffsetFromMediumSpanStart <= CMediumBlockSpanHeaderSize then
-              LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
-
-            {It is possible that a new medium block is in the process of being split off from the sequential feed span by
-            another thread, in which case the block size may not yet be set properly.  In this case we need to wait for
-            the other thread to complete allocation of the block.}
-            LPMediumBlock := Pointer(PAnsiChar(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart);
-            LLockWaitTimeMilliseconds := 0;
-            while (GetMediumBlockSize(LPMediumBlock) = 0)
-              and FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) do
-            begin
-              OS_AllowOtherThreadToRun;
-            end;
-
-            {Has the other thread completed the allocation, or is this perhaps a memory pool corruption?}
-            if GetMediumBlockSize(LPMediumBlock) = 0 then
-            begin
-              {If there was a reasonable wait time then raise an error, otherwise skip the entire span since it is not
-              possible to walk the blocks in the span without knowing the size of the first block.}
-              if ALockTimeoutMilliseconds >= 1000 then
-                System.Error(reInvalidPtr)
-              else
-                LBlockOffsetFromMediumSpanStart := LPMediumBlockSpan.SpanSize;
-            end;
-
           end
           else
             LBlockOffsetFromMediumSpanStart := CMediumBlockSpanHeaderSize;
@@ -9766,7 +9756,30 @@ begin
             while LBlockOffsetFromMediumSpanStart < LPMediumBlockSpan.SpanSize do
             begin
               LPMediumBlock := Pointer(PAnsiChar(LPMediumBlockSpan) + LBlockOffsetFromMediumSpanStart);
-              LMediumBlockSize := GetMediumBlockSize(LPMediumBlock);
+
+              {It is possible that a new medium block is in the process of being split off from the sequential feed span
+              by another thread, in which case the block size may not yet be set properly.  In this case we need to wait
+              for the other thread to complete allocation of the block.}
+              LLockWaitTimeMilliseconds := 0;
+              {$IF CompilerVersion < 18}LMediumBlockSize := 0; {Silence a false-positive "may not have been initialized" warning}{$IFEND}
+              while True do
+              begin
+                LMediumBlockSize := GetMediumBlockSize(LPMediumBlock);
+                if LMediumBlockSize <> 0 then
+                  Break;
+
+                if not FastMM_WalkBlocks_CheckTimeout(LLockWaitTimeMilliseconds, LTimestampMilliseconds, ALockTimeoutMilliseconds) then
+                  Break;
+
+                OS_AllowOtherThreadToRun;
+              end;
+
+              {Skip the rest of the span if the timeout has expired.}
+              if LLockWaitTimeMilliseconds > ALockTimeoutMilliseconds then
+              begin
+                Result := False;
+                Break;
+              end;
 
               LBlockInfo.BlockIsFree := BlockIsFree(LPMediumBlock);
               if (not AWalkUsedBlocksOnly) or (not LBlockInfo.BlockIsFree) then
@@ -9801,9 +9814,8 @@ begin
                     begin
                       if LPSmallBlockManager.SequentialFeedSmallBlockSpan = LPMediumBlock then
                       begin
+                        {If the sequential feed span is set then the offset can be assumed to be valid.}
                         LSmallBlockOffset := LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue;
-                        if LSmallBlockOffset < CSmallBlockSpanHeaderSize then
-                          LSmallBlockOffset := CSmallBlockSpanHeaderSize;
                       end
                       else
                         LSmallBlockOffset := CSmallBlockSpanHeaderSize;
@@ -10090,8 +10102,11 @@ begin
 
     btSmallBlock:
     begin
-      LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ABlockInfo.BlockSize) - 1) shr CSmallBlockGranularityBits];
-      Inc(LPMemoryManagerState.SmallBlockTypeStates[LSmallBlockTypeIndex].AllocatedBlockCount);
+      if not ABlockInfo.BlockIsFree then
+      begin
+        LSmallBlockTypeIndex := SmallBlockTypeLookup[(NativeUInt(ABlockInfo.BlockSize) - 1) shr CSmallBlockGranularityBits];
+        Inc(LPMemoryManagerState.SmallBlockTypeStates[LSmallBlockTypeIndex].AllocatedBlockCount);
+      end;
     end;
 
   end;
@@ -10147,9 +10162,9 @@ begin
 
   if not ABlockInfo.BlockIsFree then
   begin
-    LStartChunkIndex := NativeUInt(ABlockInfo.UserData) shr 16;
+    LStartChunkIndex := NativeUInt(ABlockInfo.BlockAddress) shr 16;
 
-    LEndChunkIndex := LStartChunkIndex + NativeUInt(ABlockInfo.BlockSize shr 16);
+    LEndChunkIndex := LStartChunkIndex + NativeUInt(ABlockInfo.BlockSize - 1) shr 16;
     if LEndChunkIndex > High(TMemoryMap) then
       LEndChunkIndex := High(TMemoryMap);
 
@@ -10516,6 +10531,7 @@ var
   LPNode: PMemoryLogNode;
   LFileHandle: THandle;
   LSortCompare: TMemoryLogNode_SortCompare;
+  LExistingFileAction: TTextFileAlreadyExistsAction;
 begin
   {Get the current memory manager usage summary.}
   LMemoryManagerUsageSummary := FastMM_GetUsageSummary;
@@ -10618,10 +10634,12 @@ begin
         LPStateLogPos := AppendTextToBuffer(APAdditionalDetails, LPStateLogPos, LPBufferEnd);
       end;
 
-      {Delete the old file and write the new one.}
+      {Write the log file, optionally truncating it first.}
       if ATruncateFile then
-        OS_DeleteFile(APFilename);
-      if OpenOrCreateTextFile(APFilename, True, LFileHandle) then
+        LExistingFileAction := faeTruncateFile
+      else
+        LExistingFileAction := faeAddLineBreak;
+      if OpenOrCreateTextFile(APFilename, LExistingFileAction, LFileHandle) then
       begin
         Result := AppendTextFile(LFileHandle, LPStateLogBufferStart, CharCount(LPStateLogPos, LPStateLogBufferStart));
         OS_CloseFile(LFileHandle);
@@ -11624,7 +11642,7 @@ begin
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
 
-      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerAndABACounter := 0;
+      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := CSmallBlockSpanHeaderSize;
       LPSmallBlockManager.BlockSize := Word(LSmallBlockSize);
       LPSmallBlockManager.MinimumSpanSize := LMinimumSmallBlockSpanSize;
       LPSmallBlockManager.OptimalSpanSize := LOptimalSmallBlockSpanSize;
@@ -11643,6 +11661,7 @@ begin
     {The circular list of spans is empty initially.}
     LPMediumBlockManager.FirstMediumBlockSpanHeader := PMediumBlockSpanHeader(LPMediumBlockManager);
     LPMediumBlockManager.LastMediumBlockSpanHeader := PMediumBlockSpanHeader(LPMediumBlockManager);
+    LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := CMediumBlockSpanHeaderSize;
 
     {All the free block bins are empty.}
     for LBinInd := 0 to CMediumBlockBinCount - 1 do
@@ -11717,7 +11736,7 @@ begin
     FilLChar(LPMediumBlockManager.MediumBlockBinBitmaps, SizeOf(LPMediumBlockManager.MediumBlockBinBitmaps), 0);
     for LBinIndex := 0 to CMediumBlockBinCount - 1 do
       LPMediumBlockManager.FirstFreeBlockInBin[LBinIndex] := @LPMediumBlockManager.FirstFreeBlockInBin[LBinIndex];
-    LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := 0;
+    LPMediumBlockManager.LastMediumBlockSequentialFeedOffset.IntegerValue := CMediumBlockSpanHeaderSize;
     LPMediumBlockManager.SequentialFeedMediumBlockSpan := nil;
     LPMediumBlockManager.PendingFreeList := nil;
   end;
@@ -11732,7 +11751,7 @@ begin
       LPSmallBlockManager := @LPSmallBlockArena[LBlockTypeIndex];
       LPSmallBlockManager.FirstPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
       LPSmallBlockManager.LastPartiallyFreeSpan := PSmallBlockSpanHeader(LPSmallBlockManager);
-      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := 0;
+      LPSmallBlockManager.LastSmallBlockSequentialFeedOffset.IntegerValue := CSmallBlockSpanHeaderSize;
       LPSmallBlockManager.SequentialFeedSmallBlockSpan := nil;
       LPSmallBlockManager.PendingFreeList := nil;
     end;
@@ -11783,6 +11802,22 @@ begin
   Result := CurrentInstallationState;
 end;
 
+{Sets various configuration options based on whether debug mode is enabled and the options that are enabled for debug
+mode.}
+procedure ApplyDebugModeOptions;
+begin
+  if DebugModeActive then
+  begin
+    MayFreeSmallBlockSpans := not (dmoNeverFreeSmallBlockSpans in DebugModeOptions);
+    MayMergeFreeMediumBlocks := not (dmoNeverMergeFreeMediumBlocks in DebugModeOptions);
+  end
+  else
+  begin
+    MayFreeSmallBlockSpans := True;
+    MayMergeFreeMediumBlocks := True;
+  end;
+end;
+
 {Configures the appropriate entry points for each of the memory manager functions according to the current settings,
 e.g. whether debug or normal mode is in effect.}
 function FastMM_SetMemoryManagerEntryPoints: Boolean;
@@ -11824,6 +11859,15 @@ begin
 
   SetMemoryManager(LNewMemoryManager);
   InstalledMemoryManager := LNewMemoryManager;
+
+  {The new memory manager entry points have been set, so update the flags to indicate which modes are active.}
+  DebugModeActive := DebugModeCounter > 0;
+  EraseAllocatedBlockContentActive := EraseAllocatedBlockContentCounter > 0;
+  EraseFreedBlockContentActive := EraseFreedBlockContentCounter > 0;
+
+  {Update some configuration options based on whether debug mode is enabled or not, and if enabled the options that are
+  set for debug mode.}
+  ApplyDebugModeOptions;
 
   Result := True;
 end;
@@ -12004,52 +12048,135 @@ begin
   DebugSupportConfigured := True;
 end;
 
-function FastMM_EnterDebugMode: Boolean;
+function AdjustDebugModeCounter(ACounterAdjustment: Integer): Boolean;
 begin
   SetMemoryManagerLock.Lock;
   try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Inc(DebugModeCounter);
-      if DebugModeCounter = 1 then
-      begin
-        if not DebugSupportConfigured then
-          FastMM_ConfigureDebugMode;
+    Inc(DebugModeCounter, ACounterAdjustment);
 
-        Result := FastMM_SetMemoryManagerEntryPoints;
-      end
-      else
-        Result := True;
+    if CurrentInstallationState <> mmisInstalled then
+    begin
+      Result := False;
+      Exit;
+    end;
+
+    {Does the current state match the counter?  If not, try to set the memory manager.}
+    if (DebugModeCounter > 0) <> DebugModeActive then
+    begin
+      if (not DebugSupportConfigured) and (DebugModeCounter > 0) then
+        FastMM_ConfigureDebugMode;
+
+      Result := FastMM_SetMemoryManagerEntryPoints;
     end
     else
-      Result := False;
+      Result := True;
+
   finally
     SetMemoryManagerLock.Unlock;
   end;
+end;
+
+function FastMM_EnterDebugMode: Boolean;
+begin
+  Result := AdjustDebugModeCounter(1);
 end;
 
 function FastMM_ExitDebugMode: Boolean;
 begin
+  Result := AdjustDebugModeCounter(-1);
+end;
+
+function FastMM_DebugModeActive: Boolean;
+begin
+  Result := DebugModeActive;
+end;
+
+function FastMM_GetDebugModeOptions: TFastMM_DebugModeOptions;
+begin
+  Result := DebugModeOptions;
+end;
+
+procedure FastMM_SetDebugModeOptions(ADebugModeOptions: TFastMM_DebugModeOptions);
+begin
+  DebugModeOptions := ADebugModeOptions;
+
+  ApplyDebugModeOptions;
+end;
+
+function AdjustEraseAllocatedBlockContentCounter(ACounterAdjustment: Integer): Boolean;
+begin
   SetMemoryManagerLock.Lock;
   try
-    if CurrentInstallationState = mmisInstalled then
+    Inc(EraseAllocatedBlockContentCounter, ACounterAdjustment);
+
+    if CurrentInstallationState <> mmisInstalled then
     begin
-      Dec(DebugModeCounter);
-      if DebugModeCounter = 0 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
       Result := False;
+      Exit;
+    end;
+
+    {Does the current state match the counter?  If not, try to set the memory manager.}
+    if (EraseAllocatedBlockContentCounter > 0) <> EraseAllocatedBlockContentActive then
+      Result := FastMM_SetMemoryManagerEntryPoints
+    else
+      Result := True;
+
   finally
     SetMemoryManagerLock.Unlock;
   end;
 end;
 
-function FastMM_DebugModeActive: Boolean;
+function FastMM_BeginEraseAllocatedBlockContent: Boolean;
 begin
-  Result := DebugModeCounter > 0;
+  Result := AdjustEraseAllocatedBlockContentCounter(1);
+end;
+
+function FastMM_EndEraseAllocatedBlockContent: Boolean;
+begin
+  Result := AdjustEraseAllocatedBlockContentCounter(-1);
+end;
+
+function FastMM_EraseAllocatedBlockContentActive: Boolean;
+begin
+  Result := EraseAllocatedBlockContentActive;
+end;
+
+function AdjustEraseFreedBlockContentCounter(ACounterAdjustment: Integer): Boolean;
+begin
+  SetMemoryManagerLock.Lock;
+  try
+    Inc(EraseFreedBlockContentCounter, ACounterAdjustment);
+
+    if CurrentInstallationState <> mmisInstalled then
+    begin
+      Result := False;
+      Exit;
+    end;
+
+    {Does the current state match the counter?  If not, try to set the memory manager.}
+    if (EraseFreedBlockContentCounter > 0) <> EraseFreedBlockContentActive then
+      Result := FastMM_SetMemoryManagerEntryPoints
+    else
+      Result := True;
+
+  finally
+    SetMemoryManagerLock.Unlock;
+  end;
+end;
+
+function FastMM_BeginEraseFreedBlockContent: Boolean;
+begin
+  Result := AdjustEraseFreedBlockContentCounter(1);
+end;
+
+function FastMM_EndEraseFreedBlockContent: Boolean;
+begin
+  Result := AdjustEraseFreedBlockContentCounter(-1);
+end;
+
+function FastMM_EraseFreedBlockContentActive: Boolean;
+begin
+  Result := EraseFreedBlockContentActive;
 end;
 
 function FastMM_GetDebugModeStackTraceEntryCount: Byte;
@@ -12063,92 +12190,6 @@ begin
     AStackTraceEntryCount := CFastMM_StackTrace_MaximumEntryCount;
 
   DebugMode_StackTrace_EntryCount := AStackTraceEntryCount;
-end;
-
-function FastMM_BeginEraseAllocatedBlockContent: Boolean;
-begin
-  SetMemoryManagerLock.Lock;
-  try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Inc(EraseAllocatedBlockContentCounter);
-      if EraseAllocatedBlockContentCounter = 1 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
-      Result := False;
-  finally
-    SetMemoryManagerLock.Unlock;
-  end;
-end;
-
-function FastMM_EndEraseAllocatedBlockContent: Boolean;
-begin
-  SetMemoryManagerLock.Lock;
-  try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Dec(EraseAllocatedBlockContentCounter);
-      if EraseAllocatedBlockContentCounter = 0 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
-      Result := False;
-  finally
-    SetMemoryManagerLock.Unlock;
-  end;
-end;
-
-function FastMM_EraseAllocatedBlockContentActive: Boolean;
-begin
-  Result := EraseAllocatedBlockContentCounter > 0;
-end;
-
-function FastMM_BeginEraseFreedBlockContent: Boolean;
-begin
-  SetMemoryManagerLock.Lock;
-  try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Inc(EraseFreedBlockContentCounter);
-      if EraseFreedBlockContentCounter = 1 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
-      Result := False;
-  finally
-    SetMemoryManagerLock.Unlock;
-  end;
-end;
-
-function FastMM_EndEraseFreedBlockContent: Boolean;
-begin
-  SetMemoryManagerLock.Lock;
-  try
-    if CurrentInstallationState = mmisInstalled then
-    begin
-      Dec(EraseFreedBlockContentCounter);
-      if EraseFreedBlockContentCounter = 0 then
-        Result := FastMM_SetMemoryManagerEntryPoints
-      else
-        Result := True;
-    end
-    else
-      Result := False;
-  finally
-    SetMemoryManagerLock.Unlock;
-  end;
-end;
-
-function FastMM_EraseFreedBlockContentActive: Boolean;
-begin
-  Result := EraseFreedBlockContentCounter > 0;
 end;
 
 procedure FastMM_ApplyConditionalDefines;
