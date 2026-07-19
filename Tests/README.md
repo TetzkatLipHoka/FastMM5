@@ -15,7 +15,7 @@ Kompilieren (Beispiel Delphi 7):
 | `FastMM5Diag_UsagePerSizeClass.dpr` | Leck-Detektor: hämmert GetMem/FreeMem pro Größenklasse und druckt danach `FastMM_GetUsageSummary` — Allokiert/Overhead müssen konstant bleiben. |
 | `FastMM5Diag_MultiThreadStress.dpr` | Parametrisierbarer Multithread-Stresstest: `Threads Iterationen MaxSize Debug(0/1) CrossFree(0/1)`. Druckt am Ende die Usage-Bilanz. |
 
-## Debug-Modus-Adressraumwachstum (Upstream-Bug, im Fork behoben)
+## Debug-Modus-Adressraumwachstum (upstream seit 07/2026 per DebugModeOptions steuerbar)
 
 Upstream werden Medium-Blöcke im Debug-Modus beim Freigeben **nicht koalesziert** (bewusst, um
 Fill-Pattern/Free-Stacktraces freier Blöcke als Use-after-free-Tripwire zu erhalten). Als
@@ -30,9 +30,18 @@ ohne). Reproduziert identisch mit Delphi 7-, 10-Seattle- und 13.1-Builds (2026-0
     FastMM5Diag_MultiThreadStress.exe 8 30000 70000 1 1   -> ~1,12 GB Overhead (upstream)
     FastMM5Diag_MultiThreadStress.exe 8 100000 70000 1 1  -> Crash (2-GB-Adressraum erschöpft)
 
-**Fork-Fix:** Im Debug-Zweig des Medium-Frees prüft ein Span-Walk (`MediumBlockSpanAllBlocksFree`),
-ob alle Blöcke des Spans frei sind; wenn ja, wird der Span nach Entfernen seiner gebinnten Blöcke
-regulär ans OS zurückgegeben. Der aktuelle Sequential-Feed-Span ist ausgenommen, solange er einen
-ungefütterten Rest hat; die Debug-Tripwires lebender Spans bleiben vollständig erhalten. Ergebnis:
-8×30000 → ~60 MB Steady-State statt 1,12 GB; 8×120000 läuft ohne Wachstum durch; Normalmodus
-byte-identisch. Verifiziert mit Delphi 7, 10 Seattle und 13.1.
+**Stand nach Upstream-Nachmerge (07/2026):** Upstream hat das Problem in Issue #82 über
+`FastMM_Get/SetDebugModeOptions` gelöst. Standardmäßig bleibt das alte Verhalten erhalten
+(`dmoNeverMergeFreeMediumBlocks` + `dmoNeverFreeSmallBlockSpans` gesetzt — volle Tripwires,
+dafür das oben beschriebene Wachstum). Wer den Debug-Modus unter Multithread-Last dauerhaft
+laufen lassen will, leert die Optionen:
+
+    FastMM_SetDebugModeOptions([]);
+
+Damit werden freie Medium-Blöcke wieder koalesziert und Small-Block-Spans freigegeben:
+8×30000-Churn → ~12,6 MB Overhead statt ~1,12 GB (verifiziert mit Delphi 7 und 13.1,
+Win32+Win64). Trade-off: keine Use-after-free-Tripwires auf freien Medium-Blöcken.
+Unabhängig von den Optionen merged Upstream im Debug-Modus jetzt immer nicht-binnbare
+Splitter (unterhalb der kleinsten Medium-Blockgröße) beim Free des Vorgängerblocks.
+Der frühere Fork-eigene Span-Walk-Fix (`MediumBlockSpanAllBlocksFree`) ist damit obsolet
+und wurde beim Nachmerge entfernt.
