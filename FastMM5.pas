@@ -5419,12 +5419,14 @@ begin
     while True do
     begin
       LOldPendingFreeList := LPLargeBlockManager.PendingFreeList;
-      PPointer(APLargeBlock)^ := LOldPendingFreeList;
 
       {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
-      list will still not be caught, but this may help and it is cheap.}
+      list will still not be caught, but this may help and it is cheap.  The comparison must be performed before the
+      next pointer is written into the block, otherwise the write would corrupt the pending free list (the block would
+      point to itself) before the error is raised.}
       if LOldPendingFreeList <> APLargeBlock then
       begin
+        PPointer(APLargeBlock)^ := LOldPendingFreeList;
         if AtomicCmpExchange(LPLargeBlockManager.PendingFreeList, APLargeBlock, LOldPendingFreeList) = LOldPendingFreeList then
           Break;
       end
@@ -5921,12 +5923,14 @@ begin
     while True do
     begin
       LFirstPendingFreeBlock := LPMediumBlockManager.PendingFreeList;
-      PPointer(APMediumBlock)^ := LFirstPendingFreeBlock;
 
       {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
-      list will still not be caught, but this may help and it is cheap.}
+      list will still not be caught, but this may help and it is cheap.  The comparison must be performed before the
+      next pointer is written into the block, otherwise the write would corrupt the pending free list (the block would
+      point to itself) before the error is raised.}
       if LFirstPendingFreeBlock <> APMediumBlock then
       begin
+        PPointer(APMediumBlock)^ := LFirstPendingFreeBlock;
         if AtomicCmpExchange(LPMediumBlockManager.PendingFreeList, APMediumBlock, LFirstPendingFreeBlock) = LFirstPendingFreeBlock then
           Break;
       end
@@ -7388,12 +7392,14 @@ begin
     while True do
     begin
       LOldFirstFreeBlock := LPSmallBlockManager.PendingFreeList;
-      PPointer(APSmallBlock)^ := LOldFirstFreeBlock;
 
       {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
-      list will still not be caught, but this may help and it is cheap.}
+      list will still not be caught, but this may help and it is cheap.  The comparison must be performed before the
+      next pointer is written into the block, otherwise the write would corrupt the pending free list (the block would
+      point to itself) before the error is raised.}
       if LOldFirstFreeBlock <> APSmallBlock then
       begin
+        PPointer(APSmallBlock)^ := LOldFirstFreeBlock;
         if AtomicCmpExchange(LPSmallBlockManager.PendingFreeList, APSmallBlock, LOldFirstFreeBlock) = LOldFirstFreeBlock then
           Break;
       end
@@ -8428,16 +8434,18 @@ asm
   {The small block manager is currently locked, so we need to add this block to its pending free list.}
 @ManagerCurrentlyLocked:
   mov eax, TSmallBlockManager(esi).PendingFreeList
-  mov [edx], eax
 
   {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
-  list will still not be caught, but this may help and it is cheap.}
+  list will still not be caught, but this may help and it is cheap.  The comparison must be performed before the next
+  pointer is written into the block, otherwise the write would corrupt the pending free list (the block would point to
+  itself) before the error is raised.}
   cmp eax, edx
   jne @NotDoubleFreeAttempt
   mov al, reInvalidPtr
   call System.Error
 @NotDoubleFreeAttempt:
 
+  mov [edx], eax
   lock cmpxchg TSmallBlockManager(esi).PendingFreeList, edx
   jne @ManagerCurrentlyLocked
 
@@ -8522,16 +8530,18 @@ asm
   {The small block manager is currently locked, so we need to add this block to its pending free list.}
 @ManagerCurrentlyLocked:
   mov rax, TSmallBlockManager(rsi).PendingFreeList
-  mov [rdx], rax
 
   {Try to catch an immediate double-free attempt on the same block.  A double-free nested deeper in the pending free
-  list will still not be caught, but this may help and it is cheap.}
+  list will still not be caught, but this may help and it is cheap.  The comparison must be performed before the next
+  pointer is written into the block, otherwise the write would corrupt the pending free list (the block would point to
+  itself) before the error is raised.}
   cmp rax, rdx
   jne @NotDoubleFreeAttempt
   mov cl, reInvalidPtr
   call System.Error
 @NotDoubleFreeAttempt:
 
+  mov [rdx], rax
   lock cmpxchg TSmallBlockManager(rsi).PendingFreeList, rdx
   jne @ManagerCurrentlyLocked
 
