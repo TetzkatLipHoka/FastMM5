@@ -15,6 +15,7 @@ Kompilieren (Beispiel Delphi 7):
 | `FastMM5Diag_UsagePerSizeClass.dpr` | Leck-Detektor: hämmert GetMem/FreeMem pro Größenklasse und druckt danach `FastMM_GetUsageSummary` — Allokiert/Overhead müssen konstant bleiben. |
 | `FastMM5Diag_MultiThreadStress.dpr` | Parametrisierbarer Multithread-Stresstest: `Threads Iterationen MaxSize Debug(0/1) CrossFree(0/1)`. Druckt am Ende die Usage-Bilanz. Kompiliert mit dcc32 und dcc64 (pointer-breiter Mailbox-Austausch via `XchgPtr`). |
 | `FastMM5Diag_SSE2Check.dpr` | Verifiziert, dass SSE2 auch unter Delphi 7 voll aktiv ist: movdqu-Opcodes byte-korrekt assembliert (D7s BASM kann SSE2 nativ — kein db-Hardcoding nötig), CPUID-Erkennung (`Compat_TestSSE`-Logik) wählt die SSE2-Moves, Realloc-Upsize durch alle SSE2-Klassen erhält Inhalte. Kompiliert mit dcc32 und dcc64 (eigene x64-asm-Varianten, plattformspezifische Soll-Opcodes). |
+| `FastMM5Diag_DoubleFreeCycle.dpr` | Double-Free-Selbstzyklus (#73): erzwingt per Walk-Lock den Pending-Free-Pfad; zweiter FreeMem muss EInvalidPointer werfen, OHNE den Pending-Link zu korrumpieren. Parameter: Blockgröße (2000/50000/500000 für Small/Medium/Large). |
 
 ## Debug-Modus-Adressraumwachstum (upstream seit 07/2026 per DebugModeOptions steuerbar)
 
