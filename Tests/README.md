@@ -15,6 +15,7 @@ Kompilieren (Beispiel Delphi 7):
 | `FastMM5Diag_UsagePerSizeClass.dpr` | Leck-Detektor: hämmert GetMem/FreeMem pro Größenklasse und druckt danach `FastMM_GetUsageSummary` — Allokiert/Overhead müssen konstant bleiben. |
 | `FastMM5Diag_MultiThreadStress.dpr` | Parametrisierbarer Multithread-Stresstest: `Threads Iterationen MaxSize Debug(0/1) CrossFree(0/1)`. Druckt am Ende die Usage-Bilanz. |
 | `FastMM5Diag_DoubleFreeCycle.dpr` | Double-Free-Selbstzyklus (#73): erzwingt per Walk-Lock den Pending-Free-Pfad; zweiter FreeMem muss EInvalidPointer werfen, OHNE den Pending-Link zu korrumpieren. Parameter: Blockgröße (2000/50000/500000 für Small/Medium/Large). |
+| `FastMM5Diag_ModeTransition.dpr` | Counter-Rollback bei fehlgeschlagener Modus-Transition (#85 Reopen): installiert einen externen MM, sodass Enter/Begin scheitern; danach darf ein balanciertes Recovery-Paar `*Active` nicht hängen lassen. Deckt alle drei Modi, den Cross-Mode-Durchschlag und die normale Nesting-Semantik ab. |
 
 ## Debug-Modus-Adressraumwachstum (upstream seit 07/2026 per DebugModeOptions steuerbar)
 
