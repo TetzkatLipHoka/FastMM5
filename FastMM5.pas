@@ -11638,9 +11638,6 @@ begin
 
     if CurrentInstallationState <> mmisInstalled then
     begin
-      {The transition cannot be performed:  Roll back the counter adjustment so that the counter stays consistent with
-      the actual mode state.  (See the note in AdjustEraseFreedBlockContentCounter.)}
-      Dec(DebugModeCounter, ACounterAdjustment);
       Result := False;
       Exit;
     end;
@@ -11652,8 +11649,6 @@ begin
         FastMM_ConfigureDebugMode;
 
       Result := FastMM_SetMemoryManagerEntryPoints;
-      if not Result then
-        Dec(DebugModeCounter, ACounterAdjustment);
     end
     else
       Result := True;
@@ -11698,20 +11693,13 @@ begin
 
     if CurrentInstallationState <> mmisInstalled then
     begin
-      {The transition cannot be performed:  Roll back the counter adjustment so that the counter stays consistent with
-      the actual mode state.  (See the note in AdjustEraseFreedBlockContentCounter.)}
-      Dec(EraseAllocatedBlockContentCounter, ACounterAdjustment);
       Result := False;
       Exit;
     end;
 
     {Does the current state match the counter?  If not, try to set the memory manager.}
     if (EraseAllocatedBlockContentCounter > 0) <> EraseAllocatedBlockContentActive then
-    begin
-      Result := FastMM_SetMemoryManagerEntryPoints;
-      if not Result then
-        Dec(EraseAllocatedBlockContentCounter, ACounterAdjustment);
-    end
+      Result := FastMM_SetMemoryManagerEntryPoints
     else
       Result := True;
 
@@ -11743,22 +11731,13 @@ begin
 
     if CurrentInstallationState <> mmisInstalled then
     begin
-      {The transition cannot be performed:  Roll back the counter adjustment.  If the failed adjustment were retained,
-      the counter would no longer reflect the actual (unchanged) mode state, and since FastMM_SetMemoryManagerEntryPoints
-      derives the entry points and the *Active flags directly from the counters, a subsequent successful transition
-      (of this or another mode) would apply the wrong configuration and leave FastMM_EraseFreedBlockContentActive stuck.}
-      Dec(EraseFreedBlockContentCounter, ACounterAdjustment);
       Result := False;
       Exit;
     end;
 
     {Does the current state match the counter?  If not, try to set the memory manager.}
     if (EraseFreedBlockContentCounter > 0) <> EraseFreedBlockContentActive then
-    begin
-      Result := FastMM_SetMemoryManagerEntryPoints;
-      if not Result then
-        Dec(EraseFreedBlockContentCounter, ACounterAdjustment);
-    end
+      Result := FastMM_SetMemoryManagerEntryPoints
     else
       Result := True;
 

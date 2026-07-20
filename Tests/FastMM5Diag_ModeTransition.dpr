@@ -1,13 +1,20 @@
 program FastMM5Diag_ModeTransition;
-{Regressionstest fuer #85 (Reopen): Eine fehlgeschlagene Modus-Transition (externer MM installiert)
- darf den Nesting-Counter NICHT verbleibend erhoehen. Sonst baut FastMM_SetMemoryManagerEntryPoints
- die Entrypoints spaeter aus dem vergifteten Counter und *Active bleibt haengen - auch modusuebergreifend.}
+{Vertrags-Regressionstest fuer die Debug-/Erase-Modus-Umschaltung (#85).
+
+ Pierres dokumentierter Vertrag (Kommentar in FastMM5.pas / Issue #85): der interne Nesting-Counter
+ wird bei JEDEM Begin/Enter- bzw. End/Exit-Aufruf angepasst - UNABHAENGIG vom Rueckgabewert. Wer die
+ Funktionen benutzt, muss Begin/Enter und End/Exit paarweise ausgleichen (auch wenn Begin/Enter False
+ liefert). *Active ist True gdw. Counter>0 UND der letzte Aufruf erfolgreich war.
+
+ Dieser Test sichert genau diesen Vertrag ab - insbesondere gegen die naheliegende (falsche) "Rollback
+ bei Fehlschlag"-Idee: die wuerde bei korrekt balancierter Nutzung den Counter ins Negative treiben,
+ sodass ein spaeteres echtes Begin den Modus nicht mehr aktiviert (Szenario A unten faengt das).}
 {$APPTYPE CONSOLE}
 uses FastMM5;
 type
-  {Delphi 7 does not publicly export TMemoryManagerEx, so use the basic TMemoryManager there.  Installing any manager
-   with different function pointers than FastMM's is enough to trigger the "changed externally" path we want to test.
-   The block size parameter became NativeInt in XE2 (CompilerVersion 23); older compilers use Integer.}
+  {Delphi 7 exportiert TMemoryManagerEx nicht; dort genuegt der 3-Feld-TMemoryManager. Ein Manager mit
+   anderen Funktionszeigern als FastMM loest den "changed externally"-Pfad aus (Begin/Enter -> False).
+   Der Groessenparameter wurde in XE2 (CompilerVersion 23) NativeInt; aeltere Compiler nutzen Integer.}
   {$if CompilerVersion >= 18}
   TMMRec = TMemoryManagerEx;
   {$else}
@@ -35,83 +42,67 @@ end;
 
 var
   LExt: TMMRec;
-  LFailedActive: Boolean;
 
-{Ruft waehrend eines installierten externen MM zweimal Begin auf (beide muessen scheitern),
- stellt FastMM wieder her und prueft per balanciertem Begin/End-Paar, dass Active danach False ist.}
-procedure TestFreedContentRollback;
+{Szenario A (Kern): Ein fehlgeschlagenes Begin wird vertragsgemaess mit End balanciert. Danach muss ein
+ ECHTES Begin/End-Paar den Modus weiterhin korrekt schalten. (Ein Fehlschlag-Rollback wuerde hier den
+ Counter ins Negative treiben und das echte Begin wirkungslos machen.)}
+procedure TestBalancedThroughFailure_Freed;
+var LActiveAfterRealBegin: Boolean;
 begin
   SetMemoryManager(LExt);
   try
-    Chk(not FastMM_BeginEraseFreedBlockContent, 'FreedContent: 1. Begin scheitert mit externem MM');
-    Chk(not FastMM_BeginEraseFreedBlockContent, 'FreedContent: 2. Begin scheitert mit externem MM');
+    Chk(not FastMM_BeginEraseFreedBlockContent, 'Freed/A: Begin scheitert mit externem MM');
+    {Vertrag: Active ist False, obwohl der Counter erhoeht wurde (letzter Aufruf nicht erfolgreich).}
+    Chk(not FastMM_EraseFreedBlockContentActive, 'Freed/A: nach Fehlschlag inaktiv (letzter Aufruf != Erfolg)');
   finally
     SetMemoryManager(GOrig);
   end;
-  Chk(FastMM_BeginEraseFreedBlockContent, 'FreedContent: Recovery-Begin gelingt');
-  Chk(FastMM_EndEraseFreedBlockContent, 'FreedContent: Recovery-End gelingt');
-  LFailedActive := FastMM_EraseFreedBlockContentActive;
-  while FastMM_EraseFreedBlockContentActive do
-    FastMM_EndEraseFreedBlockContent;
-  Chk(not LFailedActive, 'FreedContent: Active nach balanciertem Paar wieder False');
+  Chk(FastMM_EndEraseFreedBlockContent, 'Freed/A: balancierendes End gelingt');
+  {Jetzt echte Nutzung - MUSS aktivieren.}
+  Chk(FastMM_BeginEraseFreedBlockContent, 'Freed/A: echtes Begin gelingt');
+  LActiveAfterRealBegin := FastMM_EraseFreedBlockContentActive;
+  Chk(FastMM_EndEraseFreedBlockContent, 'Freed/A: echtes End gelingt');
+  Chk(LActiveAfterRealBegin, 'Freed/A: echtes Begin AKTIVIERT den Modus (Counter intakt)');
+  Chk(not FastMM_EraseFreedBlockContentActive, 'Freed/A: nach echtem Paar wieder inaktiv');
 end;
 
-procedure TestAllocatedContentRollback;
+procedure TestBalancedThroughFailure_Allocated;
+var LActiveAfterRealBegin: Boolean;
 begin
   SetMemoryManager(LExt);
   try
-    Chk(not FastMM_BeginEraseAllocatedBlockContent, 'AllocContent: 1. Begin scheitert');
-    Chk(not FastMM_BeginEraseAllocatedBlockContent, 'AllocContent: 2. Begin scheitert');
+    Chk(not FastMM_BeginEraseAllocatedBlockContent, 'Alloc/A: Begin scheitert mit externem MM');
+    Chk(not FastMM_EraseAllocatedBlockContentActive, 'Alloc/A: nach Fehlschlag inaktiv');
   finally
     SetMemoryManager(GOrig);
   end;
-  Chk(FastMM_BeginEraseAllocatedBlockContent, 'AllocContent: Recovery-Begin gelingt');
-  Chk(FastMM_EndEraseAllocatedBlockContent, 'AllocContent: Recovery-End gelingt');
-  LFailedActive := FastMM_EraseAllocatedBlockContentActive;
-  while FastMM_EraseAllocatedBlockContentActive do
-    FastMM_EndEraseAllocatedBlockContent;
-  Chk(not LFailedActive, 'AllocContent: Active nach balanciertem Paar wieder False');
+  Chk(FastMM_EndEraseAllocatedBlockContent, 'Alloc/A: balancierendes End gelingt');
+  Chk(FastMM_BeginEraseAllocatedBlockContent, 'Alloc/A: echtes Begin gelingt');
+  LActiveAfterRealBegin := FastMM_EraseAllocatedBlockContentActive;
+  Chk(FastMM_EndEraseAllocatedBlockContent, 'Alloc/A: echtes End gelingt');
+  Chk(LActiveAfterRealBegin, 'Alloc/A: echtes Begin AKTIVIERT den Modus (Counter intakt)');
+  Chk(not FastMM_EraseAllocatedBlockContentActive, 'Alloc/A: nach echtem Paar wieder inaktiv');
 end;
 
-procedure TestDebugModeRollback;
+procedure TestBalancedThroughFailure_Debug;
+var LActiveAfterRealEnter: Boolean;
 begin
   SetMemoryManager(LExt);
   try
-    Chk(not FastMM_EnterDebugMode, 'DebugMode: 1. Enter scheitert');
-    Chk(not FastMM_EnterDebugMode, 'DebugMode: 2. Enter scheitert');
+    Chk(not FastMM_EnterDebugMode, 'Debug/A: Enter scheitert mit externem MM');
+    Chk(not FastMM_DebugModeActive, 'Debug/A: nach Fehlschlag inaktiv');
   finally
     SetMemoryManager(GOrig);
   end;
-  Chk(FastMM_EnterDebugMode, 'DebugMode: Recovery-Enter gelingt');
-  Chk(FastMM_ExitDebugMode, 'DebugMode: Recovery-Exit gelingt');
-  LFailedActive := FastMM_DebugModeActive;
-  while FastMM_DebugModeActive do
-    FastMM_ExitDebugMode;
-  Chk(not LFailedActive, 'DebugMode: Active nach balanciertem Paar wieder False');
+  Chk(FastMM_ExitDebugMode, 'Debug/A: balancierendes Exit gelingt');
+  Chk(FastMM_EnterDebugMode, 'Debug/A: echtes Enter gelingt');
+  LActiveAfterRealEnter := FastMM_DebugModeActive;
+  Chk(FastMM_ExitDebugMode, 'Debug/A: echtes Exit gelingt');
+  Chk(LActiveAfterRealEnter, 'Debug/A: echtes Enter AKTIVIERT den Modus (Counter intakt)');
+  Chk(not FastMM_DebugModeActive, 'Debug/A: nach echtem Paar wieder inaktiv');
 end;
 
-{Cross-Mode: FreedContent scheitert (Counter darf nicht vergiftet bleiben), danach eine
- ERFOLGREICHE DebugMode-Transition. Diese baut die Entrypoints aus allen Countern - ein
- vergifteter FreedContent-Counter wuerde FastMM_FreeMem_EraseBeforeFree installieren und
- EraseFreedBlockContentActive faelschlich True setzen.}
-procedure TestCrossModeContamination;
-begin
-  SetMemoryManager(LExt);
-  try
-    FastMM_BeginEraseFreedBlockContent;
-    FastMM_BeginEraseFreedBlockContent;
-  finally
-    SetMemoryManager(GOrig);
-  end;
-  Chk(FastMM_EnterDebugMode, 'CrossMode: DebugMode-Enter gelingt nach FreedContent-Fehlschlag');
-  Chk(not FastMM_EraseFreedBlockContentActive,
-    'CrossMode: FreedContent-Active bleibt False (kein Durchschlag in fremde Transition)');
-  FastMM_ExitDebugMode;
-  while FastMM_EraseFreedBlockContentActive do
-    FastMM_EndEraseFreedBlockContent;
-end;
-
-{Normale Nesting-Semantik ohne externen MM darf sich nicht geaendert haben.}
+{Szenario B: normale verschachtelte Nutzung ohne externen MM.}
 procedure TestNormalNesting;
 begin
   Chk(FastMM_BeginEraseFreedBlockContent, 'Normal: Begin gelingt');
@@ -131,11 +122,10 @@ begin
   LExt.FreeMem := ForwardFreeMem;
   LExt.ReallocMem := ForwardReallocMem;
 
-  Writeln('#85 Counter-Rollback-Regression');
-  TestFreedContentRollback;
-  TestAllocatedContentRollback;
-  TestDebugModeRollback;
-  TestCrossModeContamination;
+  Writeln('#85 Modus-Umschaltung: Vertrags-Regressionstest');
+  TestBalancedThroughFailure_Freed;
+  TestBalancedThroughFailure_Allocated;
+  TestBalancedThroughFailure_Debug;
   TestNormalNesting;
 
   if GFails = 0 then Writeln('ERGEBNIS: OK')
