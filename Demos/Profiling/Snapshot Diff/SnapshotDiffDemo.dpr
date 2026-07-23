@@ -5,9 +5,9 @@ program SnapshotDiffDemo;
 {$APPTYPE CONSOLE}
 
 uses
-  FastMM5 in '..\FastMM5.pas',
+  FastMM5 in '..\..\..\FastMM5.pas',
   {$if CompilerVersion >= 23}System.SysUtils,{$else}SysUtils,{$ifend}
-  FastMM_SnapshotDiff in 'FastMM_SnapshotDiff.pas';
+  FastMM_SnapshotDiff in '..\..\..\Profiling\FastMM_SnapshotDiff.pas';
 
 type
   TDemoWidget = class(TObject)
