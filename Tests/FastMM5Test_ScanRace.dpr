@@ -1,28 +1,29 @@
-{Stress test for the race that FastMM_WalkBlocks guards against:  worker threads
- hammer small debug block allocation and freeing (so spans are constantly
- sequentially fed, split off and recycled) while another thread runs
- FastMM_ScanDebugBlocksForCorruption in a loop.
+{The counterpart to FastMM5Test_ScanCoverage:  that one checks that real
+ corruption is still found, this one that none is invented.
 
- No corruption is ever introduced, so every exception the scanner sees is a
- false positive, and any access violation is a crash in the walk itself.
+ Worker threads hammer small debug block allocation and freeing, so spans are
+ constantly sequentially fed, split off and recycled, while another thread runs
+ FastMM_ScanDebugBlocksForCorruption in a loop.  Nothing is ever corrupted here,
+ so every exception the scanner sees is a false positive, and any access
+ violation is a crash inside the walk itself.
 
- This is the counterpart to FastMM5Diag_ScanCoverage:  that one checks that real
- corruption is still found, this one that no corruption is invented.  The guard
- in FastMM_WalkBlocks trades the one against the other (upstream issue #102), so
- both directions need a test.
+ The header of a small block is populated after the block has been split off
+ from the sequential feed span, without the protection of a lock, so the walk
+ has to decide what to make of a header that may not be valid yet.  That
+ decision trades detection against false positives (see issue #102), which is
+ why both directions need a test.
 
- Usage:  FastMM5Diag_ScanRace [seconds] [threads]   (defaults: 20 seconds, 4 threads)
- Exit code 0 = no false positive, no crash.}
+ Parameters:  Seconds Threads     Defaults:  10 4}
 
-program FastMM5Diag_ScanRace;
+program FastMM5Test_ScanRace;
 
 {$APPTYPE CONSOLE}
 
 uses
   FastMM5,
-  Windows,
-  SysUtils,
-  Classes;
+  {$if CompilerVersion >= 23}Winapi.Windows, System.SysUtils, System.Classes
+  {$else}Windows, SysUtils, Classes{$ifend},
+  FastMM_TestUtils in 'FastMM_TestUtils.pas';
 
 var
   GStop: Integer = 0;
@@ -81,14 +82,14 @@ begin
       LIndex := NextRandom(CLiveBlocks);
       if LBlocks[LIndex] <> nil then
       begin
-        {Verify the block still holds what was written into it:  a corruption of
+        {Verify the block still holds what was written into it:  corruption of
          user data would show up here rather than in the scanner.}
         if PByte(LBlocks[LIndex])^ <> Byte(LSizes[LIndex]) then
           InterlockedIncrement(GWorkerErrors);
         FreeMem(LBlocks[LIndex]);
         LBlocks[LIndex] := nil;
       end;
-      {Small blocks only:  that is the path the guard in FastMM_WalkBlocks is
+      {Small blocks only:  that is the path the header validity question is
        about.}
       LSize := 16 + NextRandom(2000);
       GetMem(LBlocks[LIndex], LSize);
@@ -100,7 +101,7 @@ begin
     on E: Exception do
     begin
       InterlockedIncrement(GWorkerErrors);
-      WriteLn('  worker exception: ', E.ClassName, ': ', E.Message);
+      WriteLn('        worker exception: ', E.ClassName, ': ', E.Message);
     end;
   end;
   for i := 0 to CLiveBlocks - 1 do
@@ -118,17 +119,15 @@ begin
     except
       on E: Exception do
       begin
-        {Nothing corrupts anything here, so this is either a false positive
-         (EInvalidPointer from the scan) or a crash inside the walk.}
         if E is EAccessViolation then
         begin
           InterlockedIncrement(GScannerCrashes);
-          WriteLn('  scanner A/V: ', E.Message);
+          WriteLn('        scanner A/V: ', E.Message);
         end
         else
         begin
           InterlockedIncrement(GFalsePositives);
-          WriteLn('  scanner false positive: ', E.ClassName, ': ', E.Message);
+          WriteLn('        scanner false positive: ', E.ClassName, ': ', E.Message);
         end;
       end;
     end;
@@ -139,26 +138,16 @@ var
   GWorkers: array of TWorker;
   GScanner: TScanner;
   i, GSeconds, GThreadCount: Integer;
+
 begin
-  GSeconds := 20;
-  GThreadCount := 4;
-  if ParamCount >= 1 then
-    GSeconds := StrToIntDef(ParamStr(1), 20);
-  if ParamCount >= 2 then
-    GThreadCount := StrToIntDef(ParamStr(2), 4);
+  TestsBegin('FastMM5 corruption scan under concurrent allocation');
 
-  FastMM_MessageBoxEvents := [];
-  FastMM_LogToFileEvents := [];
-  FastMM_OutputDebugStringEvents := [];
-
-  if not FastMM_EnterDebugMode then
-  begin
-    WriteLn('FastMM_EnterDebugMode failed');
-    Halt(2);
-  end;
-
-  WriteLn(Format('Scanning while %d thread(s) churn small debug blocks for %d s ...',
+  GSeconds := StrToIntDef(ParamStr(1), 10);
+  GThreadCount := StrToIntDef(ParamStr(2), 4);
+  Info(Format('%d worker thread(s) churning small debug blocks for %d s, one thread scanning',
     [GThreadCount, GSeconds]));
+
+  Check(FastMM_EnterDebugMode, 'FastMM_EnterDebugMode succeeds');
 
   SetLength(GWorkers, GThreadCount);
   for i := 0 to GThreadCount - 1 do
@@ -176,21 +165,15 @@ begin
     GWorkers[i].Free;
   end;
 
-  FastMM_ExitDebugMode;
+  Check(FastMM_ExitDebugMode, 'FastMM_ExitDebugMode succeeds');
 
-  WriteLn(Format('  allocations      : %d', [GAllocations]));
-  WriteLn(Format('  completed scans  : %d', [GScans]));
-  WriteLn(Format('  false positives  : %d', [GFalsePositives]));
-  WriteLn(Format('  scanner crashes  : %d', [GScannerCrashes]));
-  WriteLn(Format('  worker errors    : %d', [GWorkerErrors]));
-  if (GFalsePositives = 0) and (GScannerCrashes = 0) and (GWorkerErrors = 0) then
-  begin
-    WriteLn('OK');
-    ExitCode := 0;
-  end
-  else
-  begin
-    WriteLn('FAILED');
-    ExitCode := 1;
-  end;
+  Section('Results');
+  Info(Format('%d allocations, %d completed scans', [GAllocations, GScans]));
+  Check(GAllocations > 0, 'the workers ran');
+  Check(GScans > 0, 'the scanner ran');
+  CheckEqualsInt(0, GFalsePositives, 'the scan reported no corruption that was never there');
+  CheckEqualsInt(0, GScannerCrashes, 'the scan did not crash');
+  CheckEqualsInt(0, GWorkerErrors, 'the workers saw no corrupted block content');
+
+  TestsEnd;
 end.

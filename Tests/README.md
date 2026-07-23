@@ -1,54 +1,76 @@
-# FastMM5 Diagnose-Tests
+# FastMM5 test suite
 
-Kleine Konsolen-Testprogramme, entstanden bei der Delphi-7-Portierung (07/2026). Sie kompilieren
-mit allen unterstützten Compilern (getestet: Delphi 7, 10 Seattle, 13.1) und dienen der schnellen
-Verifikation nach Änderungen an FastMM5.pas.
+Console test programs for FastMM5, plus a script that builds and runs them with
+every Delphi installation it finds.
 
-Kompilieren (Beispiel Delphi 7):
+Each test is a standalone console application that exits with **0 when every
+check passed** and with the number of failed checks otherwise, so the suite
+needs no test framework and plugs into any CI step that looks at exit codes.
 
-    dcc32 -B -U"..;<Delphi>\Lib" -O"<Delphi>\Lib" FastMM5Diag_DebugMode.dpr
+## Running
 
-| Programm | Zweck |
+```powershell
+pwsh -File RunTests.ps1                  # every configured compiler, Win32 and Win64
+pwsh -File RunTests.ps1 -Only D13.1      # a single compiler
+pwsh -File RunTests.ps1 -Platforms Win32 # a single platform
+pwsh -File RunTests.ps1 -Quick           # shorter stress runs (for a quick check)
+pwsh -File RunTests.ps1 -VerboseOutput   # print the full output of every test
+```
+
+The exit code of the script is the number of failed test runs. Edit the
+`$Compilers` table at the top of the script if your Delphi installations are not
+under `C:\Delphi\...`.
+
+A single test can also be built and run by hand:
+
+```
+dcc32 -B -U..;<lib\win32\release> -NSSystem;System.Win;Winapi;Vcl FastMM5Test_DebugMode.dpr
+FastMM5Test_DebugMode.exe
+```
+
+Compile from within the `Tests` directory - older compilers resolve the
+`in 'FastMM_TestUtils.pas'` clause relative to the current directory.
+
+## The tests
+
+| Program | What it covers |
 |---|---|
-| `FastMM5Diag_DebugMode.dpr` | Basistest Debug-Modus: Header-Layout (SizeOf muss 64 sein), GetMem/FreeMem, Größen-Schleife, Realloc-Kette — einzelthreaded. |
-| `FastMM5Diag_SizeClasses.dpr` | Debug-Modus über alle Größenklassen (Small/Medium/Large bis 2 MB) inkl. klassenübergreifender Reallocs. |
-| `FastMM5Diag_UsagePerSizeClass.dpr` | Leck-Detektor: hämmert GetMem/FreeMem pro Größenklasse und druckt danach `FastMM_GetUsageSummary` — Allokiert/Overhead müssen konstant bleiben. |
-| `FastMM5Diag_MultiThreadStress.dpr` | Parametrisierbarer Multithread-Stresstest: `Threads Iterationen MaxSize Debug(0/1) CrossFree(0/1)`. Druckt am Ende die Usage-Bilanz. Kompiliert mit dcc32 und dcc64 (pointer-breiter Mailbox-Austausch via `XchgPtr`). |
-| `FastMM5Diag_SSE2Check.dpr` | Verifiziert, dass SSE2 auch unter Delphi 7 voll aktiv ist: movdqu-Opcodes byte-korrekt assembliert (D7s BASM kann SSE2 nativ — kein db-Hardcoding nötig), CPUID-Erkennung (`Compat_TestSSE`-Logik) wählt die SSE2-Moves, Realloc-Upsize durch alle SSE2-Klassen erhält Inhalte. Kompiliert mit dcc32 und dcc64 (eigene x64-asm-Varianten, plattformspezifische Soll-Opcodes). |
-| `FastMM5Diag_DoubleFreeCycle.dpr` | Double-Free-Selbstzyklus (#73): erzwingt per Walk-Lock den Pending-Free-Pfad; zweiter FreeMem muss EInvalidPointer werfen, OHNE den Pending-Link zu korrumpieren. Parameter: Blockgröße (2000/50000/500000 für Small/Medium/Large). |
-| `FastMM5Diag_ModeTransition.dpr` | Vertrags-Regressionstest der Modus-Umschaltung (#85): der Nesting-Counter zählt Aufrufe unabhängig vom Rückgabewert (Pierres Vertrag — Begin/Enter immer mit End/Exit balancieren, auch bei False). Installiert einen externen MM (Begin scheitert), balanciert vertragsgemäß und prüft, dass ein anschließendes echtes Begin/End-Paar den Modus wieder korrekt schaltet — fängt insb. die falsche „Rollback bei Fehlschlag"-Idee (negativer Counter). Alle drei Modi + normale Nesting-Semantik. |
-| `FastMM5Diag_ScanCoverage.dpr` | Deckungs-Regressionstest für `FastMM_ScanDebugBlocksForCorruption` (Issue #102): Header-Checksumme, Footer-Overrun und Write-after-free, jeweils über Small/Medium/Large — alle 10 Fälle müssen erkannt werden. Zwischen `cad1f04` und `a9526b2` verfehlte der Scan die drei Small-Fälle **still**. Merke: Korruptionstests, die zufällig einen Large Block nehmen, beweisen nichts über den Small-Pfad. |
-| `FastMM5Diag_ScanRace.dpr` | Gegenrichtung zu ScanCoverage: n Threads walken Small-Debug-Blöcke durch, ein Thread scannt in der Schleife — **nichts** wird korrumpiert, jede Exception ist also ein Fehlalarm. Parameter: `Sekunden Threads` (Default 20/4). Der Guard in `FastMM_WalkBlocks` tauscht Erkennung gegen Fehlalarm-Risiko, deshalb braucht es beide Richtungen. |
-| `FastMM5Diag_ScanHeaderBounds.dpr` | Korrumpiert gezielt die **Größenfelder** (`UserSize`, `StackTraceEntryCount`) — die bestimmen, WO der Scan liest. Erwartung überall: sauberes `EInvalidPointer`, nie eine AV. Hütet damit die Auswertungs-Reihenfolge: Header-Checksumme wird zuerst verglichen, und weil FastMM5 mit abgeschalteter vollständiger Boolean-Auswertung übersetzt, fällt der Footer-Zugriff per Kurzschluss weg. Kein „Small freed"-Fall — siehe Kommentar im Quelltext (das Anlegen des Exception-Objekts bekäme genau den korrumpierten Block aus der Debug-Free-Queue). |
-| `FastMM5Diag_SharedMMHardening.dpr` | Shared-MM-Discovery-Härtung (#84): spielt im selben Prozess den Angreifer (legt die `FastMM_PID_*`-Mapping für die eigene PID an), hinterlegt Schadpointer und prüft, dass `FastMM_AttemptToUseSharedMemoryManager` sie abweist statt zu crashen — bei gleichzeitig intakter Adoption eines gültigen Records. **Kein SysUtils/keine Allokation vor den API-Aufrufen** (sonst greift der HasLivePointers-Guard). Ohne Fix: Runtime Error 216. |
+| `FastMM5Test_DebugMode.dpr` | Smoke test: entering and leaving debug mode, allocating, writing, reallocating and freeing in both modes, and the allocated byte count returning to its starting value. |
+| `FastMM5Test_SizeClasses.dpr` | Every size class from 1 byte to 2 MB, plus reallocations across the class boundaries, each verified by a size dependent fill pattern. |
+| `FastMM5Test_UsagePerSizeClass.dpr` | Churns each size class in turn and asserts that nothing stays allocated and that the committed address space does not keep growing from phase to phase. |
+| `FastMM5Test_ModeTransition.dpr` | The contract of the debug and erase mode switches (issue #85): the nesting counter follows the calls, not their success, so a failed Begin still has to be balanced with an End. Guards against the "roll back on failure" idea, which drives the counter negative under correct usage. |
+| `FastMM5Test_DoubleFree.dpr` | Double free handling (issue #73): the second free must be rejected *and* must leave the pending free list intact, in particular without the block ending up pointing at itself. Uses a walker thread that sleeps on the block under test to force the pending free path deterministically. |
+| `FastMM5Test_ScanCoverage.dpr` | `FastMM_ScanDebugBlocksForCorruption` must detect a corrupted header checksum, an overrun into the debug footer and a write into a freed block - for small, medium and large blocks (issue #102, where the small block cases silently stopped being detected). |
+| `FastMM5Test_ScanRace.dpr` | The other direction: while threads churn small debug blocks, a scanning thread must not report corruption that is not there, and must not crash. |
+| `FastMM5Test_ScanHeaderBounds.dpr` | Corrupts the size fields in the debug header (`UserSize`, `StackTraceEntryCount`), which is what decides where the scan reads. Each case must produce a clean corruption report rather than an access violation. |
+| `FastMM5Test_MultiThreadStress.dpr` | Multithreaded allocation stress with optional cross thread frees through a lock free mailbox; asserts content integrity and the closing balance. Parameters: `Threads Iterations MaxBlockSize DebugMode CrossThreadFree`. |
 
-## Debug-Modus-Adressraumwachstum (upstream seit 07/2026 per DebugModeOptions steuerbar)
+`FastMM_TestUtils.pas` holds the shared scaffolding: the assertions, the failure
+counter and the exit code convention. It also silences message boxes and the
+event log file, because several tests corrupt blocks on purpose and a modal
+dialog would hang an unattended run.
 
-Upstream werden Medium-Blöcke im Debug-Modus beim Freigeben **nicht koalesziert** (bewusst, um
-Fill-Pattern/Free-Stacktraces freier Blöcke als Use-after-free-Tripwire zu erhalten). Als
-Nebeneffekt kann die "Span komplett frei"-Prüfung nie zuschlagen — Medium-Spans werden im
-Debug-Modus **nie** ans OS zurückgegeben. Unter Multithread-Last wird daraus eine Ratsche:
-Immer wenn ein Thread die Bins verfehlt, weil die Arena mit dem passenden freien Block gerade
-gelockt ist, wird ein neuer 3-MB-Span committet — und bleibt für immer. Der Overhead wächst
-unbegrenzt; eine 32-Bit-EXE stirbt mit Runtime Error (Adressraum voll). Einzelthreaded ist das
-Verhalten gutartig (konvergiert); Cross-Thread-Frees sind **keine** Zutat (identisches Wachstum
-ohne). Reproduziert identisch mit Delphi 7-, 10-Seattle- und 13.1-Builds (2026-07-16):
+## Notes for writing further tests
 
-    FastMM5Diag_MultiThreadStress.exe 8 30000 70000 1 1   -> ~1,12 GB Overhead (upstream)
-    FastMM5Diag_MultiThreadStress.exe 8 100000 70000 1 1  -> Crash (2-GB-Adressraum erschöpft)
+Two things cost time to work out and are easy to trip over again:
 
-**Stand nach Upstream-Nachmerge (07/2026):** Upstream hat das Problem in Issue #82 über
-`FastMM_Get/SetDebugModeOptions` gelöst. Standardmäßig bleibt das alte Verhalten erhalten
-(`dmoNeverMergeFreeMediumBlocks` + `dmoNeverFreeSmallBlockSpans` gesetzt — volle Tripwires,
-dafür das oben beschriebene Wachstum). Wer den Debug-Modus unter Multithread-Last dauerhaft
-laufen lassen will, leert die Optionen:
+* **Corrupting a *freed* small block is not observable.** The block sits in the
+  debug free queue and is a candidate for the next allocation of that size. When
+  the scan reports the corruption it raises an exception, and raising allocates
+  the exception object - which hands out exactly that block, so the corruption is
+  detected again while an exception is already in flight and the process dies
+  before any handler runs. That is the memory manager doing its job; the test
+  simply cannot see it. Use medium or large blocks for freed block cases.
+* **A corruption test that uses a large block proves nothing about small
+  blocks.** The walk treats the three size classes differently, which is exactly
+  how issue #102 stayed unnoticed. Every corruption test here therefore runs
+  across all three classes.
 
-    FastMM_SetDebugModeOptions([]);
+## Compiler support
 
-Damit werden freie Medium-Blöcke wieder koalesziert und Small-Block-Spans freigegeben:
-8×30000-Churn → ~12,6 MB Overhead statt ~1,12 GB (verifiziert mit Delphi 7 und 13.1,
-Win32+Win64). Trade-off: keine Use-after-free-Tripwires auf freien Medium-Blöcken.
-Unabhängig von den Optionen merged Upstream im Debug-Modus jetzt immer nicht-binnbare
-Splitter (unterhalb der kleinsten Medium-Blockgröße) beim Free des Vorgängerblocks.
-Der frühere Fork-eigene Span-Walk-Fix (`MediumBlockSpanAllBlocksFree`) ist damit obsolet
-und wurde beim Nachmerge entfernt.
+The tests build with Delphi XE3 and later, matching FastMM5 itself, and are
+verified against Delphi 10 Seattle and Delphi 13.1 on Win32 and Win64.
+
+The version guards in the sources (`{$if CompilerVersion >= ...}`) are there so
+that the same files also work in forks that support older compilers; on XE3 and
+later they are inert.

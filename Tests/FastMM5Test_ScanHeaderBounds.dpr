@@ -22,40 +22,34 @@
  test simply cannot observe it.  For medium and large blocks the exception
  object is far too small to be given the freed block, so those cases are stable.}
 
-program FastMM5Diag_ScanHeaderBounds;
+program FastMM5Test_ScanHeaderBounds;
 
 {$APPTYPE CONSOLE}
 
 uses
   FastMM5,
-  SysUtils;
+  {$if CompilerVersion >= 23}System.SysUtils{$else}SysUtils{$ifend},
+  FastMM_TestUtils in 'FastMM_TestUtils.pas';
 
 function Header(APointer: Pointer): PFastMM_DebugBlockHeader;
 begin
   Result := PFastMM_DebugBlockHeader(PAnsiChar(APointer) - SizeOf(TFastMM_DebugBlockHeader));
 end;
 
-var
-  GFailures: Integer = 0;
-
-{Runs the scan and describes what came back.  Anything other than a proper
- corruption report counts as a failure:  an access violation means the scan read
- where the corrupted size field pointed it, and silence means the corruption
- went unnoticed.}
-function ScanOutcome: string;
+{Runs the scan and checks the outcome.  Anything other than a proper corruption
+ report is a failure:  an access violation means the scan read where the
+ corrupted size field pointed it, and silence means the corruption went
+ unnoticed.}
+procedure CheckScanReportsCorruption(const AWhat: string);
 begin
   try
     FastMM_ScanDebugBlocksForCorruption(1000);
-    Result := 'FAIL  no error          (corruption NOT reported)';
-    Inc(GFailures);
+    Check(False, AWhat + ':  no error - the corruption was NOT reported');
   except
     on E: EAccessViolation do
-      begin
-      Result := 'FAIL  ACCESS VIOLATION  (' + E.Message + ')';
-      Inc(GFailures);
-      end;
+      Check(False, AWhat + ':  ACCESS VIOLATION - ' + E.Message);
     on E: Exception do
-      Result := 'ok    reported          (' + E.ClassName + ')';
+      Check(True, AWhat + ':  reported (' + E.ClassName + ')');
   end;
 end;
 
@@ -63,7 +57,6 @@ procedure TestUserSize(const AWhat: string; ASize: Integer; AFreeFirst: Boolean)
 var
   LP: Pointer;
   LOriginal: NativeInt;
-  LOutcome: string;
 begin
   GetMem(LP, ASize);
   if AFreeFirst then
@@ -72,70 +65,46 @@ begin
   {A plausible corruption:  something overran the previous block and wrote over
    the size field of this one.  Everything else in the header is untouched.}
   Header(LP).UserSize := $30000000;
-  LOutcome := ScanOutcome;
+  CheckScanReportsCorruption('UserSize, ' + AWhat);
   Header(LP).UserSize := LOriginal;
   if not AFreeFirst then
     FreeMem(LP);
-  WriteLn(Format('  %-46s %s', [AWhat, LOutcome]));
-  {Flush after every case:  this program deliberately corrupts the heap, so if a
-   later case brings the process down, everything up to that point must already
-   be on the console (piped output is buffered otherwise).}
-  Flush(Output);
 end;
 
 procedure TestStackTraceEntryCount(const AWhat: string; ASize: Integer; AFreeFirst: Boolean);
 var
   LP: Pointer;
   LOriginal: Byte;
-  LOutcome: string;
 begin
   GetMem(LP, ASize);
   if AFreeFirst then
     FreeMem(LP);
   LOriginal := Header(LP).StackTraceEntryCount;
   Header(LP).StackTraceEntryCount := 255;
-  LOutcome := ScanOutcome;
+  CheckScanReportsCorruption('StackTraceEntryCount, ' + AWhat);
   Header(LP).StackTraceEntryCount := LOriginal;
   if not AFreeFirst then
     FreeMem(LP);
-  WriteLn(Format('  %-46s %s', [AWhat, LOutcome]));
-  {Flush after every case:  this program deliberately corrupts the heap, so if a
-   later case brings the process down, everything up to that point must already
-   be on the console (piped output is buffered otherwise).}
-  Flush(Output);
 end;
 
 begin
-  FastMM_MessageBoxEvents := [];
-  FastMM_LogToFileEvents := [];
-  FastMM_OutputDebugStringEvents := [];
+  TestsBegin('FastMM5 corrupted size fields in the debug block header');
 
-  if not FastMM_EnterDebugMode then
-  begin
-    WriteLn('FastMM_EnterDebugMode failed');
-    Halt(2);
-  end;
+  Check(FastMM_EnterDebugMode, 'FastMM_EnterDebugMode succeeds');
 
-  WriteLn('Corrupted size fields in the debug block header');
-  WriteLn('==============================================');
-  WriteLn;
-  WriteLn('UserSize overwritten with $30000000:');
+  Section('UserSize overwritten with $30000000');
   TestUserSize('small block, allocated', 100, False);
   TestUserSize('medium block, allocated', 50000, False);
   TestUserSize('medium block, freed', 50000, True);
   TestUserSize('large block, allocated', 300000, False);
   TestUserSize('large block, freed', 300000, True);
-  WriteLn;
-  WriteLn('StackTraceEntryCount overwritten with 255:');
+
+  Section('StackTraceEntryCount overwritten with 255');
   TestStackTraceEntryCount('small block, allocated', 100, False);
   TestStackTraceEntryCount('medium block, allocated', 50000, False);
   TestStackTraceEntryCount('large block, freed', 300000, True);
 
-  FastMM_ExitDebugMode;
-  WriteLn;
-  if GFailures = 0 then
-    WriteLn('ERGEBNIS: OK')
-  else
-    WriteLn('ERGEBNIS: ', GFailures, ' FEHLER');
-  ExitCode := GFailures;
+  Check(FastMM_ExitDebugMode, 'FastMM_ExitDebugMode succeeds');
+
+  TestsEnd;
 end.
