@@ -6,10 +6,10 @@ program SamplingProfilerDemo;
 {$APPTYPE CONSOLE}
 
 uses
-  FastMM5 in '..\FastMM5.pas',
+  FastMM5 in '..\..\..\FastMM5.pas',
   Classes,
   {$if CompilerVersion >= 23}System.SysUtils, Winapi.Windows,{$else}SysUtils, Windows,{$ifend}
-  FastMM_SamplingProfiler in 'FastMM_SamplingProfiler.pas';
+  FastMM_SamplingProfiler in '..\..\..\Profiling\FastMM_SamplingProfiler.pas';
 
 type
   TBlob = class(TObject)

@@ -98,6 +98,12 @@ type
     LargeBlockAllocatedBytes: Int64;
     LargeBlockReservedBytes: Int64;
     LargeBlockCount: Int64;
+    {Cumulative arena lock contention counts (since program start) at the moment of the sample.  Plotting these over
+    time shows the contention rate (the slope) alongside the memory trends;  a rising slope means the allocator is
+    increasingly starved of unlocked arenas.}
+    SmallBlockContentionCount: Int64;
+    MediumBlockContentionCount: Int64;
+    LargeBlockContentionCount: Int64;
   end;
 
   {A callback invoked for every sample.  It runs on the sampling thread, so it must be thread safe and must not block
@@ -221,6 +227,12 @@ begin
     ASample.EfficiencyPercentage := 100.0 * ASample.AllocatedBytes / ASample.ReservedBytes
   else
     ASample.EfficiencyPercentage := 100.0;
+
+  {The arena lock contention counters are independent of the block state walk;  read them here so every sample the
+  profiler produces carries them.}
+  ASample.SmallBlockContentionCount := Int64(FastMM_SmallBlockThreadContentionCount);
+  ASample.MediumBlockContentionCount := Int64(FastMM_MediumBlockThreadContentionCount);
+  ASample.LargeBlockContentionCount := Int64(FastMM_LargeBlockThreadContentionCount);
 end;
 
 function FastMM_TakeMemorySample(ALockTimeoutMilliseconds: Cardinal): TFastMM_MemorySample;
@@ -305,6 +317,9 @@ begin
   LText := LText + ',' + IntToStr(ASample.LargeBlockAllocatedBytes);
   LText := LText + ',' + IntToStr(ASample.LargeBlockReservedBytes);
   LText := LText + ',' + IntToStr(ASample.LargeBlockCount);
+  LText := LText + ',' + IntToStr(ASample.SmallBlockContentionCount);
+  LText := LText + ',' + IntToStr(ASample.MediumBlockContentionCount);
+  LText := LText + ',' + IntToStr(ASample.LargeBlockContentionCount);
   LText := LText + #13#10;
   Result := AnsiString(LText);
 end;
@@ -456,7 +471,8 @@ begin
   WriteStringToHandle(FSummaryHandle,
     'sample_index,wall_clock,elapsed_ms,mm_usage_bytes,allocated_bytes,reserved_bytes,overhead_bytes,'
     + 'efficiency_pct,small_alloc_bytes,small_reserved_bytes,small_block_count,medium_alloc_bytes,'
-    + 'medium_reserved_bytes,medium_block_count,large_alloc_bytes,large_reserved_bytes,large_block_count'#13#10);
+    + 'medium_reserved_bytes,medium_block_count,large_alloc_bytes,large_reserved_bytes,large_block_count,'
+    + 'small_contention,medium_contention,large_contention'#13#10);
 end;
 
 procedure TFastMM_SamplingProfiler.WriteDetailHeader;
