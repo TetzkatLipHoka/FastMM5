@@ -3865,7 +3865,17 @@ function FastMM_DetectStringData(APMemoryBlock: Pointer; AAvailableSpaceInBlock:
 type
   {The layout of a string header.}
   PStrRec = ^StrRec;
+{$ifdef FPC}{$ifdef 64Bit}{$define FPC64BitStringHeader}{$endif}{$endif}
   StrRec = packed record
+{$ifdef FPC64BitStringHeader}
+    {FPC's TAnsiRec/TUnicodeRec differ from the Delphi layout on 64-bit:  the code page and element size come first,
+    followed by a 4 byte alignment dummy and then SizeInt (i.e. 8 byte) reference count and length fields.}
+    codePage: Word;
+    elemSize: Word;
+    _Padding: Cardinal;
+    refCnt: NativeInt;
+    length: NativeInt;
+{$else}
 {$ifdef 64Bit}
     _Padding: Integer;
 {$endif}
@@ -3875,6 +3885,7 @@ type
 {$endif}
     refCnt: Integer;
     length: Integer;
+{$endif}
   end;
 const
   {If the string reference count field contains a value greater than this, then it is assumed that the block is not a
@@ -3884,7 +3895,8 @@ const
   then the data is assumed not to be a string.}
   CMinCharCode = #9; //#9 = Tab.
 var
-  LStringLength, LElementSize, LCharInd: Integer;
+  LStringLength: NativeInt;
+  LElementSize, LCharInd: Integer;
   LPAnsiString: PAnsiChar;
   LPUnicodeString: PWideChar;
 begin
