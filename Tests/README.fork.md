@@ -16,15 +16,27 @@ Die alten deutschen `FastMM5Diag_*`-Programme für DebugMode, SizeClasses, Usage
 MultiThreadStress, DoubleFreeCycle, ModeTransition und die drei Scan-Tests sind durch die
 `FastMM5Test_*`-Suite ersetzt worden (englisch, echte Assertions, Exit-Code = Anzahl Fehler).
 
-## D7-Besonderheiten beim Bauen
+## Delphi 7 in der Suite
 
-`RunTests.ps1` kennt nur Seattle und 13.1, weil die Suite upstream XE3+ adressiert. Für D7:
+`RunTests.ps1` findet Compiler selbst, aber nur die der Embarcadero-Ära (Registry-Zweig
+`Embarcadero\BDS`). **D7 registriert sich unter `Borland\Delphi` und wird deshalb nicht
+gefunden** — dafür gibt es `Tests/CompilerPaths.txt` (gitignored, liegt lokal schon):
 
-    dcc32 -B -U"..;C:\Delphi\7\Lib" -O"C:\Delphi\7\Lib" FastMM5Test_DebugMode.dpr
+    D7      = C:\Delphi\7
+    Seattle = C:\Delphi\10
+    D13.1   = C:\Delphi\13.1
 
-Aus dem `Tests`-Verzeichnis heraus aufrufen (die `in '...'`-Klausel wird relativ zum
-Arbeitsverzeichnis aufgelöst), und **nicht** aus einem sehr langen Pfad — altes `dcc32` bleibt
-dort ohne Fehlermeldung hängen.
+Damit läuft die Suite unverändert auch unter D7 (`-Only D7`); zwei Kleinigkeiten im Runner
+machen das möglich und sind bewusst auch upstream drin, damit die Datei in Fork und Upstream
+identisch bleibt: `-O` wird mitgegeben (D7s `ZLibMinimal` deklariert externe Routinen aus
+.obj-Dateien) und es gibt einen Fallback auf das flache `lib`-Verzeichnis (D7 hat kein
+`lib\win32\release`). D7/Win64 wird automatisch übersprungen, weil kein `dcc64` existiert.
+
+Stand: **45/45 Läufe grün** (D7 Win32, Seattle + 13.1 je Win32/Win64).
+
+Beim manuellen Aufruf aus dem `Tests`-Verzeichnis starten (die `in '...'`-Klausel wird relativ
+zum Arbeitsverzeichnis aufgelöst) und **nicht** aus einem sehr langen Pfad — altes `dcc32`
+bleibt dort ohne Fehlermeldung hängen.
 
 ## Debug-Modus-Adressraumwachstum (upstream seit 07/2026 per DebugModeOptions steuerbar)
 
