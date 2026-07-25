@@ -4430,6 +4430,122 @@ begin
   LogEvent(mmetDebugBlockModifiedAfterFree, LTokenValues);
 end;
 
+{The smallest run of whole 16 byte units that is worth handing to the vector loop.  Below this the block stays on the
+scalar path below, so small blocks execute exactly the code they did before.}
+const
+  CMinimumVectorFillPatternBytes = 128;
+
+{$ifdef X86ASM}
+var
+  {Set during initialization:  the vector path is only used where the CPU has SSE2.  Always true under 64-bit.}
+  FillPatternSSE2Available: Boolean;
+{$endif}
+
+{$if defined(X86ASM) or defined(X64ASM)}
+{Returns True if the ACount bytes starting at APBuffer all hold CDebugFillByteFreedBlock.  ACount must be a positive
+multiple of 16.
+
+The comparisons are accumulated into a single register with pand rather than being branched on, so the loop has one exit
+test and the run time does not depend on the data - the same property the scalar code has.  Unaligned loads are used
+because a user area is only guaranteed to be pointer aligned.}
+function FreedDebugBlockPatternIntact_SSE2(APBuffer: Pointer; ACount: NativeInt): Boolean;
+{$ifdef X64ASM}
+asm
+  {rcx = APBuffer, rdx = ACount}
+  mov eax, CDebugFillByteFreedBlock * Cardinal($01010101)
+  movd xmm1, eax
+  pshufd xmm1, xmm1, 0                  //xmm1 = 16 copies of the fill byte
+  pcmpeqd xmm0, xmm0                    //xmm0 = accumulator, all bits set
+  add rcx, rdx                          //point just past the buffer and walk up with a negative offset
+  neg rdx
+
+  cmp rdx, -64
+  jg @Check16Bytes
+
+@Loop64Bytes:
+  movdqu xmm2, [rcx + rdx]
+  movdqu xmm3, [rcx + rdx + 16]
+  movdqu xmm4, [rcx + rdx + 32]
+  movdqu xmm5, [rcx + rdx + 48]
+  pcmpeqb xmm2, xmm1
+  pcmpeqb xmm3, xmm1
+  pcmpeqb xmm4, xmm1
+  pcmpeqb xmm5, xmm1
+  pand xmm2, xmm3
+  pand xmm4, xmm5
+  pand xmm2, xmm4
+  pand xmm0, xmm2
+  add rdx, 64
+  cmp rdx, -64
+  jle @Loop64Bytes
+
+@Check16Bytes:
+  test rdx, rdx
+  jz @CheckResult
+
+@Loop16Bytes:
+  movdqu xmm2, [rcx + rdx]
+  pcmpeqb xmm2, xmm1
+  pand xmm0, xmm2
+  add rdx, 16
+  jnz @Loop16Bytes
+
+@CheckResult:
+  pmovmskb eax, xmm0                    //one bit per byte:  all set means every byte matched
+  cmp eax, $FFFF
+  sete al
+end;
+{$else}
+asm
+  {eax = APBuffer, edx = ACount}
+  push ebx
+  mov ebx, CDebugFillByteFreedBlock * Cardinal($01010101)
+  movd xmm1, ebx
+  pshufd xmm1, xmm1, 0
+  pcmpeqd xmm0, xmm0
+  add eax, edx
+  neg edx
+
+  cmp edx, -64
+  jg @Check16Bytes
+
+@Loop64Bytes:
+  movdqu xmm2, [eax + edx]
+  movdqu xmm3, [eax + edx + 16]
+  movdqu xmm4, [eax + edx + 32]
+  movdqu xmm5, [eax + edx + 48]
+  pcmpeqb xmm2, xmm1
+  pcmpeqb xmm3, xmm1
+  pcmpeqb xmm4, xmm1
+  pcmpeqb xmm5, xmm1
+  pand xmm2, xmm3
+  pand xmm4, xmm5
+  pand xmm2, xmm4
+  pand xmm0, xmm2
+  add edx, 64
+  cmp edx, -64
+  jle @Loop64Bytes
+
+@Check16Bytes:
+  test edx, edx
+  jz @CheckResult
+
+@Loop16Bytes:
+  movdqu xmm2, [eax + edx]
+  pcmpeqb xmm2, xmm1
+  pand xmm0, xmm2
+  add edx, 16
+  jnz @Loop16Bytes
+
+@CheckResult:
+  pmovmskb ebx, xmm0
+  cmp ebx, $FFFF
+  sete al
+  pop ebx
+end;
+{$ifend}
+{$ifend}
+
 {Checks that the debug fill pattern in the debug block is intact.  Returns True if the block is intact, otherwise
 (optionally) logs and/or displays the error and returns False.}
 function CheckFreedDebugBlockFillPatternIntact(APDebugBlockHeader: PFastMM_DebugBlockHeader): Boolean;
@@ -4441,6 +4557,9 @@ var
   LByteOffset: NativeInt;
   LPBlockEnd: PByte;
   LFillPatternIntact: Boolean;
+{$if defined(X86ASM) or defined(X64ASM)}
+  LVectorBytes: NativeInt;
+{$ifend}
 begin
   {Get a pointer to just after the block, and use a negative offset for traversal.}
   LPBlockEnd := PByte(APDebugBlockHeader) + APDebugBlockHeader.UserSize + CDebugBlockHeaderSize;
@@ -4454,6 +4573,22 @@ begin
   begin
     LFillPatternIntact := PPointer(@LPBlockEnd[LByteOffset])^ = TFastMM_FreedObject;
     Inc(LByteOffset, SizeOf(Pointer));
+
+{$if defined(X86ASM) or defined(X64ASM)}
+    {Hand all the whole 16 byte units to the vector loop, but only once there are enough of them to pay for the call.
+    Shorter runs fall through to the scalar code below unchanged.}
+    LVectorBytes := (-LByteOffset) and not NativeInt(15);
+    if (LVectorBytes >= CMinimumVectorFillPatternBytes)
+{$ifdef X86ASM}
+      and FillPatternSSE2Available
+{$endif}
+      then
+    begin
+      LFillPatternIntact := FreedDebugBlockPatternIntact_SSE2(@LPBlockEnd[LByteOffset], LVectorBytes)
+        and LFillPatternIntact;
+      Inc(LByteOffset, LVectorBytes);
+    end;
+{$ifend}
 
     {Check chunks of 32 bytes in a loop.}
     while LByteOffset <= -32 do
@@ -10602,6 +10737,11 @@ var
   LPLargeBlockManager: PLargeBlockManager;
   LPBin: PPointer;
 begin
+{$ifdef X86ASM}
+  {The vector fill pattern check needs SSE2, which is not guaranteed under 32-bit.}
+  FillPatternSSE2Available := System.TestSSE and 2 <> 0; //Bit 1 = 1 means the CPU supports SSE2
+{$endif}
+
   {---------Bug checks-------}
 
   {$if CSmallBlockHeaderSize <> 2} {$message error 'Small block header size must be 2 bytes'} {$endif}
