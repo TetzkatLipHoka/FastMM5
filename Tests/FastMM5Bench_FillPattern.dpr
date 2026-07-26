@@ -42,7 +42,7 @@ begin
   FastMM_MessageBoxEvents := [];
   FastMM_LogToFileEvents := [];
   FastMM_OutputDebugStringEvents := [];
-  FastMM_SetDebugModeStackTraceEntryCount(0);
+  FastMM_SetDebugModeStackTraceEntryCount(StrToIntDef(ParamStr(3), 0));
 
   if not FastMM_EnterDebugMode then
   begin

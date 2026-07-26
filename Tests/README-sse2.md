@@ -78,6 +78,55 @@ unchanged from the measurement above.
 If this branch is ever handed over, the Win64 side should adopt that
 layout-preserving integration rather than the helper call used here.
 
+## What an application gets
+
+The numbers above are routine level: one size in a loop, stack traces switched
+off, which isolates the check but is not what a program runs. Two things dilute
+it in practice, and both are measurable.
+
+**Stack traces.** The microbenchmark sets `StackTraceEntryCount` to 0; the debug
+mode default is 20, and capturing a stack trace per allocation costs roughly what
+the fill pattern check costs at medium sizes. Same measurement, Win64, at the
+default depth:
+
+| User size | depth 0 | depth 20 |
+|---:|---:|---:|
+| 64 B (control) | -1.12% [-1.68, -0.85] | +3.59% [+3.36, +4.74] |
+| 256 B | - | +4.48% [+3.53, +5.34] |
+| 1 KiB | - | +14.04% [+12.21, +16.91] |
+| 4 KiB | +64.44% | +32.31% [+30.81, +33.86] |
+
+Note the control size: without stack traces the layout effect is negative, with
+them it is positive, and both intervals exclude zero. At 64 B the two builds
+execute the same instructions, so that is layout alone - the same effect
+janrysavy found, and evidence that its sign is not even stable across
+configurations. Another reason to prefer the layout-preserving integration.
+
+**Allocation size mix.** `FastMM5Bench_AppWorkload` runs a mixed workload of the
+kind an application produces - strings, objects, growing lists, payload buffers -
+and `-histogram` reports the size distribution of the blocks that get freed,
+which is the population the check walks:
+
+```
+Blocks that can reach the vector path (>136 bytes):  18.26% of blocks, 90.64% of bytes
+Total: 32072 freed blocks, 18436579 bytes
+```
+
+Four fifths of the blocks are too small to reach the vector path - but they carry
+under a tenth of the bytes, and the check's cost scales with bytes, not with
+blocks. That is why the end to end gain is neither zero nor anywhere near the
+routine level figure:
+
+| Platform | depth 0 | depth 20 (debug mode default) |
+|---|---:|---:|
+| Win64 | +4.20% [+3.55, +5.86] | +4.35% [+3.31, +5.26] |
+| Win32 | +6.75% [+5.11, +8.48] | +8.46% [+6.82, +8.87] |
+
+Roughly 4% of total run time on Win64 and 8% on Win32, for a program spending a
+substantial share of its time allocating in debug mode. A program with a
+different size mix will get a different number, which is exactly why the
+histogram is part of the tool rather than a footnote.
+
 ## Verifying it
 
 `FastMM5Test_FillPattern` corrupts **every** byte position of a freed medium
@@ -92,11 +141,28 @@ AMD and Intel, Win32 and Win64.
 `FastMM5Bench_FillPattern` is the timing harness: one process measures one build,
 which is why it is a `Bench` program and not part of the test suite - it reports
 a time, not a pass or a fail. `MeasureFillPattern.ps1` pairs a baseline and a
-candidate executable, alternating the order, and prints the median gain:
+candidate executable, alternating the order, and prints the median gain with a
+bootstrap confidence interval:
 
 ```
 pwsh -File MeasureFillPattern.ps1 -Baseline <base>.exe -Candidate <cand>.exe
+pwsh -File MeasureFillPattern.ps1 -Root <dir> -StackTrace 20
 ```
+
+`FastMM5Bench_AppWorkload` and `MeasureAppWorkload.ps1` do the same for the
+application shaped workload, and `-histogram` reports the size distribution
+behind the number:
+
+```
+FastMM5Bench_AppWorkload 8 20 -histogram
+pwsh -File MeasureAppWorkload.ps1 -Root <dir>
+```
+
+**A median without an interval does not answer "is this real".** Our own table
+read -1.0% at a control size as noise; a paired bootstrap over the same kind of
+data shows the control effects excluding zero in both directions depending on
+configuration. Both measuring scripts therefore report an interval, and the
+control sizes exist so there is something to point it at.
 
 **Do not measure both variants inside one executable.** Below the threshold both
 run identical code, and that built-in null control still swung by up to 30% from

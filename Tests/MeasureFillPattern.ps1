@@ -7,8 +7,12 @@
   the two builds never share a process (which is what made an in-binary
   comparison unusable at these timescales).
 
-  Reports the median of the per pair throughput gains, plus the 5th and 95th
-  percentile of those gains as a spread indication.
+  Reports the median of the per pair throughput gains with a bootstrap 95%
+  confidence interval.  An interval that excludes zero is a real difference; one
+  that straddles zero is not distinguishable from noise, however large the median
+  looks.  The control sizes below the vector threshold are where this matters:
+  both builds execute the same instructions there, so anything the interval
+  reports as real is a code layout effect, not the check itself.
 
   Build each executable from a working tree of its own - one at the baseline
   revision, one at the candidate revision - and point -Baseline and -Candidate at
@@ -18,6 +22,7 @@
   Usage:
       pwsh -File MeasureFillPattern.ps1 -Baseline .\base.exe -Candidate .\cand.exe
       pwsh -File MeasureFillPattern.ps1 -Root D:\simd2 -Platform dcc32
+      pwsh -File MeasureFillPattern.ps1 -Root D:\simd2 -StackTrace 20
 #>
 
 param(
@@ -25,7 +30,12 @@ param(
   [string]$Candidate = '',
   [string]$Root = '',
   [string]$Platform = 'dcc64',
-  [int]$Pairs = 25
+  [int]$Pairs = 25,
+  # 0 isolates the allocator, which is what the routine level numbers were taken
+  # with.  20 is the debug mode default and is what an application runs with:  the
+  # stack trace per allocation dilutes the gain without removing it.
+  [int]$StackTrace = 0,
+  [int]$Resamples = 10000
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,7 +70,7 @@ $Cases = @(
 )
 
 function Invoke-Bench([string]$exe, [int]$size, [int]$iters) {
-  $out = & $exe $size $iters
+  $out = & $exe $size $iters $StackTrace
   $parts = $out.Trim() -split '\s+'
   # The benchmark prints with the system decimal separator; normalise it.
   $ms = [double]::Parse($parts[0].Replace(',', '.'), [Globalization.CultureInfo]::InvariantCulture)
@@ -73,10 +83,31 @@ function Percentile([double[]]$values, [double]$p) {
   return $sorted[$index]
 }
 
+# A percentile spread says how much the samples scattered; it does not say
+# whether a small difference is real.  Resampling the pairs with replacement and
+# taking the median of each resample does: if the resulting interval excludes
+# zero, the effect survives the noise.  That distinction matters most at the
+# control sizes, where the expected answer is "no difference".
+function BootstrapCI([double[]]$gains, [int]$resamples) {
+  $rng = [Random]::new(12345)          # fixed seed, so the interval reproduces
+  $n = $gains.Count
+  $medians = New-Object double[] $resamples
+  $sample = New-Object double[] $n
+  for ($r = 0; $r -lt $resamples; $r++) {
+    for ($i = 0; $i -lt $n; $i++) { $sample[$i] = $gains[$rng.Next($n)] }
+    $medians[$r] = Percentile $sample 0.5
+  }
+  $sorted = @($medians | Sort-Object)
+  return @{
+    lo = $sorted[[int][Math]::Floor(($resamples - 1) * 0.025)]
+    hi = $sorted[[int][Math]::Floor(($resamples - 1) * 0.975)]
+  }
+}
+
 Write-Output ""
-Write-Output "Platform: $Platform,  $Pairs pairs per size,  fresh process per sample"
+Write-Output "Platform: $Platform,  $Pairs pairs per size,  fresh process per sample,  stack trace depth $StackTrace"
 Write-Output ""
-Write-Output ("{0,10} {1,14} {2,14} {3,12} {4,18}" -f 'user size', 'baseline (ms)', 'candidate (ms)', 'gain (%)', 'gain p5..p95 (%)')
+Write-Output ("{0,10} {1,14} {2,14} {3,26}" -f 'user size', 'baseline (ms)', 'candidate (ms)', 'gain % [95% CI]')
 
 $anyMismatch = $false
 
@@ -112,12 +143,12 @@ foreach ($case in $Cases) {
   if ($checksums.Keys.Count -ne 1) { $anyMismatch = $true }
 
   $g = $gains.ToArray()
-  Write-Output ("{0,10} {1,14:F2} {2,14:F2} {3,12:F2} {4,18}" -f `
+  $ci = BootstrapCI $g $Resamples
+  Write-Output ("{0,10} {1,14:F2} {2,14:F2} {3,26}" -f `
     $case.size,
     (Percentile $baseTimes.ToArray() 0.5),
     (Percentile $candTimes.ToArray() 0.5),
-    (Percentile $g 0.5),
-    ("{0:F2} .. {1:F2}" -f (Percentile $g 0.05), (Percentile $g 0.95)))
+    ("{0:F2}  [{1:F2}, {2:F2}]" -f (Percentile $g 0.5), $ci.lo, $ci.hi))
 }
 
 Write-Output ""
