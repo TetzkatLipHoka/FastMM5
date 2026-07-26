@@ -10,18 +10,22 @@
  both variants inside one binary lets their code layout interact, which at these
  timescales swamps the effect being measured.
 
- Usage:  fillbench <user size> <iterations>
+ This is a measuring tool, not one of the FastMM5Test_ programs:  it reports a
+ time rather than passing or failing, so it is not part of the test suite that
+ RunTests.ps1 drives.  MeasureFillPattern.ps1 is the harness that runs it.
+
+ Usage:  FastMM5Bench_FillPattern <user size> <iterations>
  Prints one line:  the elapsed milliseconds and a checksum.}
 
-program fillbench;
+program FastMM5Bench_FillPattern;
 
 {$APPTYPE CONSOLE}
 {$O+}
 
 uses
-  FastMM5 in 'FastMM5.pas',
-  Windows,
-  SysUtils;
+  FastMM5,
+  {$if CompilerVersion >= 23}Winapi.Windows, System.SysUtils
+  {$else}Windows, SysUtils{$ifend};
 
 var
   GFrequency, GStart, GStop: Int64;

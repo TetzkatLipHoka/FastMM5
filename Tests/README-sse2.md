@@ -46,17 +46,57 @@ Delphi 13.1. Median of 25 alternating pairs, each sample in a fresh process.
 Win32 gains most, which is where PR #97 was weakest (+3.30% on Intel Win32 at
 4 KiB), so this lands on the side the scalar widening could not reach.
 
+## Independent reproduction, and what it found
+
+janrysavy reconstructed the approach from the description and the assembly loop
+and measured it on a Ryzen 9 7950X and a Core i7-8750H, Win32 and Win64, on top
+of `823ba35`
+([#97 comment](https://github.com/pleriche/FastMM5/pull/97#issuecomment-5082105575),
+patch on [janrysavy/FastMM5@9e0ce1a](https://github.com/janrysavy/FastMM5/commit/9e0ce1afb4ed60e47f071f10ac9c76aae9b1c30a)).
+He confirms the shape of the gains on both CPUs, and the reproduction is worth
+more than the agreement:
+
+**A straightforward Win64 integration costs the sizes that never use it.** Adding
+the helper call inside the Pascal checker made the compiler save five nonvolatile
+registers on *every* check and moved the allocator routines that follow it. The
+result was a repeatable 3.58% regression at 64 B on Intel - a size the vector
+path does not even touch. The threshold makes the small path execute the same
+*instructions*, but it does not keep the surrounding code at the same
+*addresses*, and at these timescales that is a measurable difference. This is
+the same effect that made the in-binary comparison unusable (see below), showing
+up in the shipped code instead of in the harness.
+
+His fix keeps the layout: the scalar checker retains the upstream instruction
+flow, tests the crossover once, and tail-jumps to an out-of-line SSE2 checker for
+larger blocks, with corruption logging out of line as well. That leaves
+`CheckFreedDebugBlockFillPatternIntact`, `CheckFreeDebugBlockIntact` and every
+allocator routine after them at the addresses they have in the upstream binary,
+and the 64 B regression disappears (AMD neutral at [-0.89%, +0.44%], Intel +1.08%
+at [0.57%, 1.12%]). The cost is a larger assembly surface on Win64. Win32 is
+unchanged from the measurement above.
+
+If this branch is ever handed over, the Win64 side should adopt that
+layout-preserving integration rather than the helper call used here.
+
 ## Verifying it
 
-`Tests/exhaustive.dpr` corrupts **every** byte position of a freed medium block
-across 12 sizes chosen to cover exact multiples of 64, 16/32/48 byte vector
-remainders and 1/2/3/7/15 byte scalar tails - 34,949 positions, all of which must
-be detected. Build it against this branch and against unmodified master; both
-must pass.
+`FastMM5Test_FillPattern` corrupts **every** byte position of a freed medium
+block across 12 sizes chosen to cover exact multiples of the unrolled width,
+16/32/48 byte remainders and 1/2/3/7/15 byte scalar tails - 34,949 positions, all
+of which must be detected. It is part of the suite, so `RunTests.ps1` builds and
+runs it with everything else; the full run takes about a fifth of a second.
+Build it against this branch and against unmodified master; both must pass.
+janrysavy's reproduction used the same 12 sizes and the same 34,949 positions on
+AMD and Intel, Win32 and Win64.
 
-`Tests/fillbench.dpr` is the timing harness: one process measures one build.
-`Tests/Measure.ps1` pairs a baseline and a candidate executable, alternating the
-order, and prints the median gain.
+`FastMM5Bench_FillPattern` is the timing harness: one process measures one build,
+which is why it is a `Bench` program and not part of the test suite - it reports
+a time, not a pass or a fail. `MeasureFillPattern.ps1` pairs a baseline and a
+candidate executable, alternating the order, and prints the median gain:
+
+```
+pwsh -File MeasureFillPattern.ps1 -Baseline <base>.exe -Candidate <cand>.exe
+```
 
 **Do not measure both variants inside one executable.** Below the threshold both
 run identical code, and that built-in null control still swung by up to 30% from

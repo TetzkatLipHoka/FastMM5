@@ -1,5 +1,6 @@
 <#
-  Measure.ps1 - pairs the baseline and candidate fillbench executables.
+  MeasureFillPattern.ps1 - pairs a baseline and a candidate build of
+  FastMM5Bench_FillPattern.
 
   Each sample runs in a fresh process, and the order within a pair alternates, so
   neither build is consistently favoured by clock, scheduler or thermal drift, and
@@ -8,17 +9,43 @@
 
   Reports the median of the per pair throughput gains, plus the 5th and 95th
   percentile of those gains as a spread indication.
+
+  Build each executable from a working tree of its own - one at the baseline
+  revision, one at the candidate revision - and point -Baseline and -Candidate at
+  the results, or pass -Root to a directory laid out as
+  <root>\base\<platform>\FastMM5Bench_FillPattern.exe and the same under \cand.
+
+  Usage:
+      pwsh -File MeasureFillPattern.ps1 -Baseline .\base.exe -Candidate .\cand.exe
+      pwsh -File MeasureFillPattern.ps1 -Root D:\simd2 -Platform dcc32
 #>
 
 param(
+  [string]$Baseline = '',
+  [string]$Candidate = '',
+  [string]$Root = '',
   [string]$Platform = 'dcc64',
   [int]$Pairs = 25
 )
 
 $ErrorActionPreference = 'Stop'
-$root = 'D:\simd2'
-$base = Join-Path $root "base\$Platform\fillbench.exe"
-$cand = Join-Path $root "cand\$Platform\fillbench.exe"
+
+$base = $Baseline
+$cand = $Candidate
+if ((-not $base) -or (-not $cand)) {
+  if (-not $Root) {
+    Write-Host 'Give either -Baseline and -Candidate, or -Root.'
+    exit 1
+  }
+  $base = Join-Path $Root "base\$Platform\FastMM5Bench_FillPattern.exe"
+  $cand = Join-Path $Root "cand\$Platform\FastMM5Bench_FillPattern.exe"
+}
+foreach ($exe in @($base, $cand)) {
+  if (-not (Test-Path $exe)) {
+    Write-Host "Not found: $exe"
+    exit 1
+  }
+}
 
 # size, iterations - chosen so each run takes roughly 150-400 ms
 $Cases = @(

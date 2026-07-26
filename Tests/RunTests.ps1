@@ -52,6 +52,7 @@ $Tests = @(
   @{ name = 'FastMM5Test_DoubleFree';         args = @('2000');      quickArgs = @('2000') }
   @{ name = 'FastMM5Test_ScanCoverage';       args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ScanHeaderBounds';   args = @();            quickArgs = @() }
+  @{ name = 'FastMM5Test_FillPattern';        args = @();            quickArgs = @() }
   @{ name = 'FastMM5Test_ScanRace';           args = @('10', '4');   quickArgs = @('3', '4') }
   @{ name = 'FastMM5Test_MultiThreadStress';  args = @('4', '20000', '70000', '1', '1')
                                               quickArgs = @('4', '5000', '70000', '1', '1') }
