@@ -12186,10 +12186,19 @@ begin
   if result then
     begin
     {Try to use the stack trace routines from the debug support library, if available.}
-    if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace)
-      and Assigned(DebugLibrary_GetRawStackTrace) then
+    if @FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace then
     begin
-      FastMM_GetStackTrace := DebugLibrary_GetRawStackTrace;
+    {$ifdef 64Bit}
+      {The raw tracer walks the RBP frame chain, and the 64-bit ABI does not maintain one, so under 64-bit it returns
+      an empty trace and every debug block ends up with no stack trace at all.  The support library provides a frame
+      based routine for exactly this case, built on RtlCaptureStackBackTrace;  prefer it here and fall back to the raw
+      routine only if an older support library does not export it.}
+      if Assigned(DebugLibrary_GetFrameBasedStackTrace) then
+        FastMM_GetStackTrace := DebugLibrary_GetFrameBasedStackTrace
+      else
+    {$endif}
+      if Assigned(DebugLibrary_GetRawStackTrace) then
+        FastMM_GetStackTrace := DebugLibrary_GetRawStackTrace;
     end;
 
     if @FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText then
@@ -12206,7 +12215,12 @@ begin
 {$else}
   {Use the stack trace routines from the debug support library.}
   if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace) then
+{$ifdef 64Bit}
+    {See the comment above:  the raw tracer cannot work under 64-bit.}
+    FastMM_GetStackTrace := @DebugLibrary_GetFrameBasedStackTrace;
+{$else}
     FastMM_GetStackTrace := @DebugLibrary_GetRawStackTrace;
+{$endif}
 
   if (@FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText) then
     FastMM_ConvertStackTraceToText := @FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
