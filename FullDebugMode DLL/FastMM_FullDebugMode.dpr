@@ -1,5 +1,5 @@
 {
-Fast Memory Manager: FullDebugMode Support DLL 1.70
+Fast Memory Manager: FullDebugMode Support DLL 1.71
 
 Description:
  Support DLL for FastMM. With this DLL available, FastMM will report debug info (unit name, line numbers, etc.) for
