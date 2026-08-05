@@ -1094,6 +1094,11 @@ var
   {The legacy stack trace to text conversion routine from the FastMM_FullDebugMode support DLL.  This will only be set
   if the support DLL is loaded.  This is used by the FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper function.}
   DebugLibrary_LogStackTrace_Legacy: TFastMM_LegacyConvertStackTraceToText;
+  {The Unicode stack trace to text conversion routine from the FastMM_FullDebugMode support DLL.  Support libraries
+  built before this entry point existed do not export it, in which case the legacy routine above is used instead.  It
+  is preferred when present:  the legacy interface passes the text as PAnsiChar, so a source path containing anything
+  the system ANSI code page cannot represent arrives here already replaced by question marks.}
+  DebugLibrary_LogStackTrace: TFastMM_ConvertStackTraceToText;
 {$else}
 procedure DebugLibrary_GetRawStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth, ASkipFrames: Cardinal);
   external CFastMM_DefaultDebugSupportLibraryName name 'GetRawStackTrace';
@@ -1101,6 +1106,10 @@ procedure DebugLibrary_GetFrameBasedStackTrace(APReturnAddresses: PNativeUInt; A
   external CFastMM_DefaultDebugSupportLibraryName name 'GetFrameBasedStackTrace';
 function DebugLibrary_LogStackTrace_Legacy(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
   APBuffer: PAnsiChar): PAnsiChar; external CFastMM_DefaultDebugSupportLibraryName name 'LogStackTrace';
+{Note that binding this statically requires a support library that exports it, i.e. one built from the same version of
+the sources.  A library that is too old fails to load in the same way a missing one does.}
+function DebugLibrary_LogStackTrace(APReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  APBuffer, APBufferEnd: PWideChar): PWideChar; external CFastMM_DefaultDebugSupportLibraryName name 'LogStackTraceW';
 {$endif}
 
 {$if (CompilerVersion < 18) or Defined(FPC)}
@@ -12153,6 +12162,9 @@ begin
     DebugLibrary_GetRawStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetRawStackTrace'));
     DebugLibrary_GetFrameBasedStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('GetFrameBasedStackTrace'));
     DebugLibrary_LogStackTrace_Legacy := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTrace'));
+    {Not exported by support libraries built before this entry point existed, in which case this stays nil and the
+    legacy routine is used.}
+    DebugLibrary_LogStackTrace := GetProcAddress(DebugSupportLibraryHandle, PAnsiChar('LogStackTraceW'));
   end
   else
   {$IFDEF MemoryLoadLibrarySupport}
@@ -12163,6 +12175,7 @@ begin
       DebugLibrary_GetRawStackTrace := MemoryGetProcAddress(DebugSupportLibraryRHandle, 'GetRawStackTrace');
       DebugLibrary_GetFrameBasedStackTrace := MemoryGetProcAddress(DebugSupportLibraryRHandle, 'GetFrameBasedStackTrace');
       DebugLibrary_LogStackTrace_Legacy := MemoryGetProcAddress(DebugSupportLibraryRHandle, 'LogStackTrace');
+      DebugLibrary_LogStackTrace := MemoryGetProcAddress(DebugSupportLibraryRHandle, 'LogStackTraceW');
       end;
     end;
   Result := ( DebugSupportLibraryHandle <> 0 ) {$IFDEF MemoryLoadLibrarySupport}OR Assigned( DebugSupportLibraryRHandle ){$ENDIF};
@@ -12179,10 +12192,15 @@ begin
       FastMM_GetStackTrace := DebugLibrary_GetRawStackTrace;
     end;
 
-    if (@FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText)
-      and Assigned(DebugLibrary_LogStackTrace_Legacy) then
+    if @FastMM_ConvertStackTraceToText = @FastMM_NoOpConvertStackTraceToText then
     begin
-      FastMM_ConvertStackTraceToText := FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
+      {Prefer the Unicode entry point:  it hands over the text without a round trip through the ANSI code page, and it
+      takes a buffer end, so it cannot write past the buffer.}
+      if Assigned(DebugLibrary_LogStackTrace) then
+        FastMM_ConvertStackTraceToText := DebugLibrary_LogStackTrace
+      else
+        if Assigned(DebugLibrary_LogStackTrace_Legacy) then
+          FastMM_ConvertStackTraceToText := FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper;
     end;
     end;
 {$else}
@@ -12213,7 +12231,10 @@ begin
     FastMM_GetStackTrace := @FastMM_NoOpGetStackTrace;
   end;
 
-  if @FastMM_ConvertStackTraceToText = @FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper then
+  {The Unicode routine is called through a pointer into the library itself, so it has to be cleared here as well:  the
+  library is about to be unloaded and the pointer would be left dangling.}
+  if (@FastMM_ConvertStackTraceToText = @FastMM_DebugLibrary_LegacyLogStackTrace_Wrapper)
+    or (@FastMM_ConvertStackTraceToText = @DebugLibrary_LogStackTrace) then
   begin
     FastMM_ConvertStackTraceToText := @FastMM_NoOpConvertStackTraceToText;
   end;
@@ -12235,6 +12256,7 @@ begin
   DebugLibrary_GetRawStackTrace := nil;
   DebugLibrary_GetFrameBasedStackTrace := nil;
   DebugLibrary_LogStackTrace_Legacy := nil;
+  DebugLibrary_LogStackTrace := nil;
 {$endif}
 
   DebugSupportConfigured := False;
