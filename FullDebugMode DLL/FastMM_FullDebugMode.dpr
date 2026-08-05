@@ -102,6 +102,20 @@ const
   CMaxInfoTextLength = 224;
 
 type
+  {The info text is cached and handed out as Unicode.  Source paths may contain
+  characters that the system ANSI code page cannot represent - a Japanese or
+  Cyrillic directory on a Western system - and converting through AnsiString
+  replaces those with question marks, permanently.  On a pre-Unicode compiler
+  the JCL hands us an AnsiString to begin with, so nothing is gained there for
+  mixed scripts;  the implicit conversion below still uses the ANSI code page
+  rather than assuming Latin-1, which is what makes single script non-Western
+  paths survive.}
+{$IFDEF UNICODE}
+  TInfoString = UnicodeString;
+{$ELSE}
+  TInfoString = WideString;
+{$ENDIF}
+
   {Return address info cache:  Maintains the source information for up to CReturnAddressCacheSize return addresses in
   a binary search tree.}
 
@@ -110,20 +124,21 @@ type
     ParentEntry: PReturnAddressInfo;
     ChildEntries: array[0..1] of PReturnAddressInfo;
     ReturnAddress: NativeUInt;
+    {Length in characters, not bytes.}
     InfoTextLength: Integer;
-    InfoText: array[0..CMaxInfoTextLength - 1] of AnsiChar;
+    InfoText: array[0..CMaxInfoTextLength - 1] of WideChar;
   end;
 
   TReturnAddressInfoCache = record
     {Entry 0 is the root of the tree.}
     Entries: array[0..CReturnAddressCacheSize] of TReturnAddressInfo;
     NextNewEntryIndex: Integer;
-    function AddEntry(AReturnAddress: NativeUInt; const AReturnAddressInfoText: AnsiString): PReturnAddressInfo;
+    function AddEntry(AReturnAddress: NativeUInt; const AReturnAddressInfoText: TInfoString): PReturnAddressInfo;
     procedure DeleteEntry(AEntry: PReturnAddressInfo);
     function FindEntry(AReturnAddress: NativeUInt): PReturnAddressInfo;
   end;
 
-function TReturnAddressInfoCache.AddEntry(AReturnAddress: NativeUInt; const AReturnAddressInfoText: AnsiString): PReturnAddressInfo;
+function TReturnAddressInfoCache.AddEntry(AReturnAddress: NativeUInt; const AReturnAddressInfoText: TInfoString): PReturnAddressInfo;
 var
   LParentItem, LChildItem: PReturnAddressInfo;
   LAddressBits: NativeUInt;
@@ -164,7 +179,7 @@ begin
   Result.InfoTextLength := Length(AReturnAddressInfoText);
   if Result.InfoTextLength > CMaxInfoTextLength then
     Result.InfoTextLength := CMaxInfoTextLength;
-  System.Move(Pointer(AReturnAddressInfoText)^, Result.InfoText, Result.InfoTextLength * SizeOf(AnsiChar));
+  System.Move(Pointer(AReturnAddressInfoText)^, Result.InfoText, Result.InfoTextLength * SizeOf(WideChar));
 end;
 
 procedure TReturnAddressInfoCache.DeleteEntry(AEntry: PReturnAddressInfo);
@@ -796,11 +811,11 @@ end;
 last character.}
 {$ifdef JCLDebug}
 {Converts an unsigned integer to a hexadecimal string at the buffer location, returning the new buffer position.}
-function NativeUIntToHexBuf(ANum: NativeUInt; APBuffer: PAnsiChar): PAnsiChar;
+function NativeUIntToHexBuf(ANum: NativeUInt; APBuffer: PWideChar): PWideChar;
 const
   MaxDigits = 16;
 var
-  LDigitBuffer: array[0..MaxDigits - 1] of AnsiChar;
+  LDigitBuffer: array[0..MaxDigits - 1] of WideChar;
   LCount: Cardinal;
   LDigit: NativeUInt;
 begin
@@ -811,16 +826,18 @@ begin
     ANum := ANum div 16;
     LDigit := LDigit - ANum * 16;
     Inc(LCount);
-    LDigitBuffer[MaxDigits - LCount] := HexTable[LDigit];
+    {HexTable holds AnsiChars;  the digits are all ASCII, so widening them one by
+     one is exact.}
+    LDigitBuffer[MaxDigits - LCount] := WideChar(HexTable[LDigit]);
   until ANum = 0;
   {Add leading zeros}
   while LCount < SizeOf(NativeUInt) * 2 do
   begin
     Inc(LCount);
-    LDigitBuffer[MaxDigits - LCount] := '0';
+    LDigitBuffer[MaxDigits - LCount] := WideChar('0');
   end;
   {Copy the digits to the output buffer and advance it}
-  System.Move(LDigitBuffer[MaxDigits - LCount], APBuffer^, LCount);
+  System.Move(LDigitBuffer[MaxDigits - LCount], APBuffer^, LCount * SizeOf(WideChar));
   Result := APBuffer + LCount;
 end;
 
@@ -835,7 +852,11 @@ var
   LReturnAddressInfoCache: TReturnAddressInfoCache;
   LLogStackTrace_Locked: Integer; //0 = unlocked, 1 = locked
 
-function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
+function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  ABuffer, ABufferEnd: PWideChar): PWideChar;
+const
+  {Carriage return, line feed and the hexadecimal address.}
+  CFixedCharsPerEntry = 2 + SizeOf(NativeUInt) * 2;
 var
   LInd: Cardinal;
   LAddress: NativeUInt;
@@ -844,6 +865,7 @@ var
   P: PChar;
   LLocationCacheInitialized: Boolean;
   LPInfo: PReturnAddressInfo;
+  LCharsToCopy: Integer;
 begin
   LLocationCacheInitialized := False;
 
@@ -859,9 +881,14 @@ begin
       LAddress := AReturnAddresses^;
       if LAddress = 0 then
         Exit;
-      Result^ := #13;
+      {Stop rather than run past the end of the caller's buffer.  The legacy
+       entry point had no way to express this, which is the second reason for
+       the new one.}
+      if Result + CFixedCharsPerEntry > ABufferEnd then
+        Exit;
+      Result^ := WideChar(#13);
       Inc(Result);
-      Result^ := #10;
+      Result^ := WideChar(#10);
       Inc(Result);
       Result := NativeUIntToHexBuf(LAddress, Result);
 
@@ -893,11 +920,19 @@ begin
         if LInfo.LineNumber <> 0 then
           AppendInfoToString(LTempStr, IntToStr(LInfo.LineNumber));
 
-        LPInfo := LReturnAddressInfoCache.AddEntry(LAddress, AnsiString(LTempStr));
+        {No AnsiString round trip:  on a Unicode compiler LTempStr already holds
+         whatever the source path contains, and casting it down to the ANSI code
+         page is exactly what used to destroy it.  On a pre-Unicode compiler the
+         implicit widening below goes through the ANSI code page, which is the
+         best that can be done when the JCL itself hands us ANSI text.}
+        LPInfo := LReturnAddressInfoCache.AddEntry(LAddress, LTempStr);
       end;
 
-      System.Move(LPInfo.InfoText, Result^, LPInfo.InfoTextLength);
-      Inc(Result, LPInfo.InfoTextLength);
+      LCharsToCopy := LPInfo.InfoTextLength;
+      if Result + LCharsToCopy > ABufferEnd then
+        LCharsToCopy := ABufferEnd - Result;
+      System.Move(LPInfo.InfoText, Result^, LCharsToCopy * SizeOf(WideChar));
+      Inc(Result, LCharsToCopy);
 
       Inc(AReturnAddresses);
     end;
@@ -911,6 +946,50 @@ begin
 
     LLogStackTrace_Locked := 0;
   end;
+end;
+
+{The version 4 entry point, kept so that existing callers keep working:  FastMM4
+ and versions of FastMM5 that do not know about LogStackTraceW still import this
+ name.  It produces the same ANSI text as before, question marks and all - that
+ is unavoidable through a PAnsiChar interface, and callers that want the source
+ path intact should import LogStackTraceW instead.
+
+ The legacy signature carries no buffer end, so the limit is derived the way the
+ old implementation implicitly assumed it:  FastMM allows 256 characters per
+ stack trace entry.}
+function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
+const
+  CMaxCharsPerEntry = 256;
+  {Bounds the local buffer.  FastMM never asks for more than 64 entries.}
+  CMaxEntries = 64;
+var
+  LWideBuffer: array[0..CMaxEntries * CMaxCharsPerEntry - 1] of WideChar;
+  LDepth: Cardinal;
+  LWideStart, LWideEnd: PWideChar;
+  LCharCount, LBytesWritten: Integer;
+begin
+  LDepth := AMaxDepth;
+  if LDepth > CMaxEntries then
+    LDepth := CMaxEntries;
+
+  LWideStart := @LWideBuffer[0];
+  LWideEnd := LogStackTraceW(AReturnAddresses, LDepth, LWideStart,
+    LWideStart + LDepth * CMaxCharsPerEntry);
+  LCharCount := LWideEnd - LWideStart;
+  if LCharCount <= 0 then
+  begin
+    Result := ABuffer;
+    Exit;
+  end;
+
+  {Down to the ANSI code page for the legacy caller.  Characters the code page
+   cannot represent become the default replacement character, which is the loss
+   this entry point exists to remain compatible with.}
+  LBytesWritten := WideCharToMultiByte(CP_ACP, 0, @LWideBuffer[0], LCharCount,
+    ABuffer, LCharCount, nil, nil);
+  if LBytesWritten < 0 then
+    LBytesWritten := 0;
+  Result := ABuffer + LBytesWritten;
 end;
 {$endif}
 
@@ -929,6 +1008,52 @@ begin
     true,  //show relative line number offset to procedure entry point?
     false  //skip special noise reduction processing?
     );
+end;
+
+{madStackTrace.FastMM_LogStackTrace only speaks PAnsiChar, but StackAddrToStr
+ returns a UnicodeString for a single address, so the text can be assembled here
+ without ever passing through the ANSI code page.  That makes this build as
+ Unicode capable as the JCL one rather than merely converting correctly.
+
+ madExcept formats the address into the line itself, so unlike the JCL branch
+ this one does not prepend it.}
+function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  ABuffer, ABufferEnd: PWideChar): PWideChar;
+var
+  LInd: Cardinal;
+  LAddress: NativeUInt;
+  LLine: UnicodeString;
+  LCharsToCopy: Integer;
+begin
+  Result := ABuffer;
+  for LInd := 0 to AMaxDepth - 1 do
+  begin
+    LAddress := AReturnAddresses^;
+    if LAddress = 0 then
+      Exit;
+
+    LLine := madStackTrace.StackAddrToStr(Pointer(LAddress),
+      True,  //show relative address offset to procedure entrypoint?
+      True); //show relative line number offset to procedure entry point?
+
+    if Result + 2 > ABufferEnd then
+      Exit;
+    Result^ := WideChar(#13);
+    Inc(Result);
+    Result^ := WideChar(#10);
+    Inc(Result);
+
+    LCharsToCopy := Length(LLine);
+    if Result + LCharsToCopy > ABufferEnd then
+      LCharsToCopy := ABufferEnd - Result;
+    if LCharsToCopy > 0 then
+    begin
+      System.Move(Pointer(LLine)^, Result^, LCharsToCopy * SizeOf(WideChar));
+      Inc(Result, LCharsToCopy);
+    end;
+
+    Inc(AReturnAddresses);
+  end;
 end;
 {$endif}
 
@@ -1023,6 +1148,65 @@ begin
 end;
 {$ENDIF}
 
+{$if (not declared(LogStackTraceW))}
+{The Unicode entry point for the builds that get their stack trace text from a
+ third party library which offers no Unicode route of its own.  Those libraries
+ hand out ANSI text, so a source path has already lost whatever the code page
+ cannot represent before this library sees it - nothing here can bring that back.
+
+ What it does fix is the other half of the problem:  the caller used to widen the
+ ANSI text by assuming Latin-1, which mangles every code page that is not 1252.
+ Converting through the actual code page instead means a Cyrillic path on a
+ Russian system, or a Japanese path on a Japanese system, arrives intact.  Only
+ scripts mixed within one path stay out of reach for these builds.}
+function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  ABuffer, ABufferEnd: PWideChar): PWideChar;
+const
+  CMaxCharsPerEntry = 256;
+  {FastMM never asks for more than 64 entries.}
+  CMaxEntries = 64;
+var
+  LAnsiBuffer: array[0..CMaxEntries * CMaxCharsPerEntry - 1] of AnsiChar;
+  LDepth: Cardinal;
+  LAnsiEnd: PAnsiChar;
+  LByteCount, LCharsAvailable: Integer;
+{$IFNDEF MSWINDOWS}
+  LWideText: TInfoString;
+  LAnsiText: AnsiString;
+{$ENDIF}
+begin
+  Result := ABuffer;
+
+  LDepth := AMaxDepth;
+  if LDepth > CMaxEntries then
+    LDepth := CMaxEntries;
+
+  LAnsiEnd := LogStackTrace(AReturnAddresses, LDepth, @LAnsiBuffer[0]);
+  LByteCount := LAnsiEnd - @LAnsiBuffer[0];
+  if LByteCount <= 0 then
+    Exit;
+
+  LCharsAvailable := ABufferEnd - ABuffer;
+  if LCharsAvailable <= 0 then
+    Exit;
+
+{$IFDEF MSWINDOWS}
+  Result := ABuffer + MultiByteToWideChar(CP_ACP, 0, @LAnsiBuffer[0], LByteCount,
+    ABuffer, LCharsAvailable);
+{$ELSE}
+  {No Windows code page API here;  the RTL conversion is the platform correct
+   one, which on POSIX means UTF-8 rather than a code page.}
+  SetLength(LAnsiText, LByteCount);
+  System.Move(LAnsiBuffer[0], Pointer(LAnsiText)^, LByteCount);
+  LWideText := TInfoString(LAnsiText);
+  if Length(LWideText) < LCharsAvailable then
+    LCharsAvailable := Length(LWideText);
+  System.Move(Pointer(LWideText)^, ABuffer^, LCharsAvailable * SizeOf(WideChar));
+  Result := ABuffer + LCharsAvailable;
+{$ENDIF}
+end;
+{$ifend}
+
 {-----------------------------Exported Functions----------------------------}
 
 exports
@@ -1031,7 +1215,11 @@ exports
 {$IFDEF MSWINDOWS}
   InvalidateMemoryPageAccessMap,
 {$ENDIF}
-  LogStackTrace;
+  {The version 4 entry point.  Kept for callers that predate LogStackTraceW.}
+  LogStackTrace,
+  {Hands out the stack trace text as Unicode, and takes a buffer end so it
+   cannot run past the caller's buffer.}
+  LogStackTraceW;
 
 begin
 {$ifdef JCLDebug}
