@@ -12189,10 +12189,13 @@ begin
     if @FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace then
     begin
     {$ifdef 64Bit}
-      {The raw tracer walks the RBP frame chain, and the 64-bit ABI does not maintain one, so under 64-bit it returns
-      an empty trace and every debug block ends up with no stack trace at all.  The support library provides a frame
-      based routine for exactly this case, built on RtlCaptureStackBackTrace;  prefer it here and fall back to the raw
-      routine only if an older support library does not export it.}
+      {The raw tracer discards every return address above $FFFFFFFF, because it validates them against a page access
+      map of 1M entries of 4 KB, which covers exactly 4 GB and nothing above it.  Delphi's default image base under
+      64-bit is $140000000, so an ordinary build sits above that ceiling and the tracer returns an empty trace:  every
+      debug block is then recorded with no stack trace at all.  (Building with -K00400000 puts the image below 4 GB
+      and the raw tracer works again, so this is a limit rather than a regression.)  The support library's frame based
+      routine is built on RtlCaptureStackBackTrace, which needs no page map and therefore has no such ceiling;  prefer
+      it here and fall back to the raw routine only if an older support library does not export it.}
       if Assigned(DebugLibrary_GetFrameBasedStackTrace) then
         FastMM_GetStackTrace := DebugLibrary_GetFrameBasedStackTrace
       else
@@ -12216,7 +12219,7 @@ begin
   {Use the stack trace routines from the debug support library.}
   if (@FastMM_GetStackTrace = @FastMM_NoOpGetStackTrace) then
 {$ifdef 64Bit}
-    {See the comment above:  the raw tracer cannot work under 64-bit.}
+    {See the comment above:  the raw tracer cannot see return addresses above 4 GB.}
     FastMM_GetStackTrace := @DebugLibrary_GetFrameBasedStackTrace;
 {$else}
     FastMM_GetStackTrace := @DebugLibrary_GetRawStackTrace;
