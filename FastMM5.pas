@@ -9858,7 +9858,9 @@ begin
               by another thread, in which case the block size may not yet be set properly.  In this case we need to wait
               for the other thread to complete allocation of the block.}
               LLockWaitTimeMilliseconds := 0;
-              {$IF CompilerVersion < 18}LMediumBlockSize := 0; {Silence a false-positive "may not have been initialized" warning}{$IFEND}
+              {$IF CompilerVersion < 23}LMediumBlockSize := 0; {Silence a false-positive "may not have been initialized" warning:  the
+  variable is assigned unconditionally just below, but the flow analysis of the older compilers does not see it through
+  the loop.  Measured to still be needed on Delphi 2009 (CompilerVersion 20);  13.1 does not warn.}{$IFEND}
               while True do
               begin
                 LMediumBlockSize := GetMediumBlockSize(LPMediumBlock);
