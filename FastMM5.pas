@@ -478,12 +478,13 @@ type
     CBlockIsFreeFlag) if it has been freed or is in the process of being freed.}
     DebugBlockFlags: SmallInt;
     {Returns a pointer to the start of the debug footer.  The debug footer consists of the footer checksum (dword),
-    followed by the allocation stack trace and then the free stack trace.}
-    function DebugFooterPtr: PCardinal; {$IF CompilerVersion >= 18}inline;{$IFEND}
+    followed by the allocation stack trace and then the free stack trace.  Not inlined under Delphi 2009:  Its compiler
+    fails with E2008 when the result of an inlined record method is dereferenced from another unit (e.g. the tests).}
+    function DebugFooterPtr: PCardinal; {$IF CompilerVersion >= 21}inline;{$IFEND}
     {Returns a pointer to the first entry in the allocation stack trace in the debug footer.}
-    function DebugFooter_AllocationStackTracePtr: PNativeUInt; {$IF CompilerVersion >= 18}inline;{$IFEND}
+    function DebugFooter_AllocationStackTracePtr: PNativeUInt; {$IF CompilerVersion >= 21}inline;{$IFEND}
     {Returns a pointer to the first entry in the free stack trace in the debug footer.}
-    function DebugFooter_FreeStackTracePtr: PNativeUInt; {$IF CompilerVersion >= 18}inline;{$IFEND}
+    function DebugFooter_FreeStackTracePtr: PNativeUInt; {$IF CompilerVersion >= 21}inline;{$IFEND}
     {Calculate the header checksum}
     function CalculateHeaderCheckSum: Cardinal;
     {Calculate the checksum for the stack traces that follow after the user data.}
@@ -3443,7 +3444,9 @@ begin
   begin
     {VirtualQuery fails for addresses above the highest memory address accessible to the process. (Experimentally
     determined as addresses >= $ffff0000 under 32-bit, and addresses >= $7fffffff0000 under 64-bit.)}
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
     FillChar(AMemoryRegionInfo, SizeOf(TMemoryRegionInfo), 0);
 {$else}
     AMemoryRegionInfo := Default(TMemoryRegionInfo);
@@ -4983,7 +4986,9 @@ var
   LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
   LTokenValues := Default(TEventLogTokenValues);
@@ -5150,7 +5155,9 @@ var
   LTokenValueBuffer: array[0..CTokenBufferMaxWideChars] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
   LTokenValues := Default(TEventLogTokenValues);
@@ -5170,7 +5177,9 @@ var
   LTokenValueBuffer: array[0..CTokenBufferMaxWideChars - 1] of WideChar;
   LPBufferPos, LPBufferEnd: PWideChar;
 begin
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
   LTokenValues := Default(TEventLogTokenValues);
@@ -5325,7 +5334,9 @@ begin
   if APDebugBlockHeader.UserSize >= CTObjectInstanceSize then
     PPointer(@LExpectedFillPatternFirst8Bytes)^ := TFastMM_FreedObject;
 
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
   LTokenValues := Default(TEventLogTokenValues);
@@ -5699,7 +5710,9 @@ begin
   if LPDebugBlockHeader.HeaderCheckSum <> LHeaderChecksum then
     Exit;
 
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
   LTokenValues := Default(TEventLogTokenValues);
@@ -9952,7 +9965,9 @@ begin
 
   LTimestampMilliseconds := 0;
 
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(LBlockInfo, SizeOf(TFastMM_WalkAllocatedBlocks_BlockInfo), 0);
 {$else}
   LBlockInfo := Default(TFastMM_WalkAllocatedBlocks_BlockInfo);
@@ -10409,7 +10424,9 @@ end;
 {Returns a THeapStatus structure with information about the current memory usage.}
 function FastMM_GetHeapStatus(ALockTimeoutMilliseconds: Cardinal): THeapStatus;
 begin
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(Result, SizeOf(THeapStatus), 0);
 {$else}
   Result := Default(THeapStatus);
@@ -10500,7 +10517,9 @@ var
   i, j: Integer;
   LCurrentSmallBlockType: TSmallBlockTypeState;
 begin
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(AMemoryManagerState, SizeOf(TFastMM_MemoryManagerState), 0);
 {$else}
   AMemoryManagerState := Default(TFastMM_MemoryManagerState);
@@ -10974,7 +10993,9 @@ begin
       LPBufferEnd := Pointer(PAnsiChar(LPLogInfo) + (LBufferSize));
 
       {Add the header with the usage summary.}
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
       FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
       LTokenValues := Default(TEventLogTokenValues);
@@ -10990,7 +11011,9 @@ begin
         LPBufferEnd);
 
       {Add the usage information for each class}
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
       FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
       LTokenValues := Default(TEventLogTokenValues);
@@ -11184,7 +11207,9 @@ begin
         begin
           {Memory has already been allocated using this memory manager.  We cannot rip the memory manager out from
           under live pointers.}
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
           FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
           LTokenValues := Default(TEventLogTokenValues);
@@ -11624,7 +11649,9 @@ begin
   {If individual leaks must be reported, report the leak now.}
   if mmetUnexpectedMemoryLeakDetail in (FastMM_OutputDebugStringEvents + FastMM_LogToFileEvents + FastMM_MessageBoxEvents) then
   begin
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
     FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
     LTokenValues := Default(TEventLogTokenValues);
@@ -11722,7 +11749,9 @@ begin
   end;
 
   {Build the token dictionary for the leak summary.}
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
   FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
   LTokenValues := Default(TEventLogTokenValues);
@@ -11742,8 +11771,8 @@ var
   LLeakSummary: TMemoryLeakSummary;
 begin
 {$if CompilerVersion < 21}
-  {Delphi 2009:  Default() on this large record generates faulty code that corrupts the stack frames of the callers
-  (leading to a crash during RTL shutdown).  FillChar is functionally equivalent for this record.}
+  {Delphi 2009:  Default() on this large record generates a "rep stosd" that clobbers EDI without preserving it, which
+  corrupts the callers (leading to a crash during RTL shutdown).  FillChar is functionally equivalent for this record.}
   FillChar(LLeakSummary, SizeOf(TMemoryLeakSummary), 0);
 {$else}
   LLeakSummary := Default(TMemoryLeakSummary);
@@ -12362,7 +12391,9 @@ begin
   been allocated through the default memory manager.}
   if CurrentInstallationState <> mmisDefaultMemoryManagerInUse then
   begin
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
     FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
     LTokenValues := Default(TEventLogTokenValues);
@@ -12380,7 +12411,9 @@ begin
   {$ifndef FPC}
   if System.GetHeapStatus.TotalAllocated <> 0 then
   begin
-{$if CompilerVersion < 20} {Default() is not available under compilers before Delphi 2009.  FillChar is functionally equivalent for this record.}
+{$if CompilerVersion < 21} {Default() is not available under compilers before Delphi 2009, and the Delphi 2009 compiler
+  implements it with a "rep stosd" that clobbers EDI without preserving it (callers that keep a value in EDI across the
+  call then crash), so FillChar is used there too.  FillChar is functionally equivalent for this record.}
     FillChar(LTokenValues, SizeOf(TEventLogTokenValues), 0);
 {$else}
     LTokenValues := Default(TEventLogTokenValues);
