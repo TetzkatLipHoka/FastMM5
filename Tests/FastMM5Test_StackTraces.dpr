@@ -727,7 +727,13 @@ begin
 
 {$if SizeOf(Pointer) = 8}
   Info(Format('This program is loaded at %x', [NativeUInt(HInstance)]));
+  {$if CompilerVersion >= 35}
   Check(NativeUInt(HInstance) > $FFFFFFFF, 'this program is loaded above 4GB');
+  {$else}
+  {dcc64 before 11 Alexandria truncates the image base to 32 bits, so this program is based at $40000000 and is not
+   loaded above 4GB whatever flags are set.  The checks against kernel32 below still cover frames above 4GB.}
+  Info('this program cannot be based above 4GB with this compiler (see the comment in the source)');
+  {$ifend}
 {$ifend}
 
   GLibrary := LoadLibrary(PChar(GLibraryPath));
