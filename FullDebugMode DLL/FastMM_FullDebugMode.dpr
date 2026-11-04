@@ -1,6 +1,6 @@
 {
 
-Fast Memory Manager: FullDebugMode Support DLL 1.73
+Fast Memory Manager: FullDebugMode Support DLL 1.74
 
 Description:
  Support DLL for FastMM. With this DLL available, FastMM will report debug info (unit name, line numbers, etc.) for
@@ -78,6 +78,11 @@ Change log:
     instructions are no longer taken for complete 2 and 3 byte calls.  Calls through a table that is indexed by a
     register (CALL [EAX*4+$12345678]) are now recognized.  A call that ends where executable memory ends is no longer
     rejected.  Direct far calls, which 32-bit Windows code does not use, are no longer recognized.
+ Version 1.74 (27 October 2026)
+  - Added LogStackTraceW, which converts a stack trace to Unicode text and is given the end of the buffer.  With
+    LogStackTrace, which produces ANSI text, characters that are not in the system code page are lost, e.g. in the names
+    of source files.  FastMM5 uses LogStackTraceW if the DLL has it, and LogStackTrace otherwise.  The madExcept and
+    EurekaLog builds only have LogStackTrace, since those libraries only produce ANSI text.
 
 }
 
@@ -159,6 +164,231 @@ backtrace.}
 {$define Win32RawStackTraces}
 {$ifend}
 
+{------------------------------------------}
+{--------Atomic calls for Delphi XE2-------}
+{------------------------------------------}
+
+{$IF RTLVersion < 24.00}
+
+(*
+function AtomicIncrement(var Target: Cardinal): Cardinal; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, 1
+  LOCK XADD [RCX], EAX
+  INC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, 1
+  LOCK XADD [ECX], EAX
+  INC     EAX
+{$ENDIF}
+end;
+
+*)
+
+{Used by the page map generation counter (UpdateMemoryPageAccessMap).}
+function AtomicIncrement(var Target: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, 1
+  LOCK XADD [RCX], EAX
+  INC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, 1
+  LOCK XADD [ECX], EAX
+  INC     EAX
+{$ENDIF}
+end;
+
+(*
+function AtomicIncrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  MOV     RAX, RDX
+  LOCK XADD [RCX], RAX
+  ADD     RAX, RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  LOCK XADD [ECX], EAX
+  ADD     EAX, EDX
+{$ENDIF}
+end;
+
+function AtomicDecrement(var Target: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  // <-- EAX Result
+  MOV     EAX, -1
+  LOCK XADD [RCX], EAX
+  DEC     EAX
+{$ELSE}
+  // --> EAX Target
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, -1
+  LOCK XADD [ECX], EAX
+  DEC     EAX
+{$ENDIF}
+end;
+
+function AtomicDecrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  NEG     RDX
+  MOV     RAX, RDX
+  LOCK XADD [RCX], RAX
+  ADD     RAX, RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  NEG     EDX
+  MOV     EAX, EDX
+  LOCK XADD [ECX], EAX
+  ADD     EAX, EDX
+{$ENDIF}
+end;
+
+function AtomicExchange(var Target: Integer; Value: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     EAX, EDX
+  //     RCX Target
+  //     EAX Value
+  LOCK XCHG [RCX], EAX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  //     ECX Target
+  //     EAX Value
+  LOCK XCHG [ECX], EAX
+{$ENDIF}
+end;
+
+function AtomicExchange(var Target: Pointer; Value: Pointer): Pointer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  // <-- RAX Result
+  MOV     RAX, RDX
+  LOCK XCHG [RCX], RAX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  // <-- EAX Result
+  MOV     ECX, EAX
+  MOV     EAX, EDX
+  //     ECX Target
+  //     EAX Value
+  LOCK XCHG [ECX], EAX
+{$ENDIF}
+end;
+*)
+
+function AtomicCmpExchange(var Target: Integer; Value: Integer; Compare: Integer): Integer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     EDX Value
+  //     R8  Compare
+  // <-- EAX Result
+  MOV     RAX, R8
+  //     RCX Target
+  //     EDX Value
+  //     RAX Compare
+  LOCK CMPXCHG [RCX], EDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  //     ECX Compare
+  // <-- EAX Result
+  XCHG    EAX, ECX
+  //     EAX Compare
+  //     EDX Value
+  //     ECX Target
+  LOCK CMPXCHG [ECX], EDX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Int64; Value: Int64; Compare: Int64): Int64; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  //     R8  Compare
+  // <-- RAX Result
+  MOV     RAX, R8
+  LOCK CMPXCHG [RCX], RDX
+{$ELSE}
+  PUSH EBX
+  PUSH EDI
+  MOV EDI, EAX  // Target
+  MOV EAX, DWORD PTR [Compare]
+  MOV EDX, DWORD PTR [Compare+4]
+  MOV EBX, DWORD PTR [Value]
+  MOV ECX, DWORD PTR [Value+4]
+  LOCK CMPXCHG8B QWORD PTR [EDI]
+  POP EDI
+  POP EBX
+{$ENDIF}
+end;
+
+function AtomicCmpExchange(var Target: Pointer; Value: Pointer; Compare: Pointer): Pointer; overload;
+asm
+{$IFDEF CPUX64}
+  // --> RCX Target
+  //     RDX Value
+  //     R8  Compare
+  // <-- RAX Result
+  MOV     RAX, R8
+  //     RCX Target
+  //     RDX Value
+  //     RAX Compare
+  LOCK CMPXCHG [RCX], RDX
+{$ELSE}
+  // --> EAX Target
+  //     EDX Value
+  //     ECX Compare
+  // <-- EAX Result
+  XCHG    EAX, ECX
+  //     EAX Comp
+  //     EDX Value
+  //     ECX Target
+  LOCK CMPXCHG [ECX], EDX
+{$ENDIF}
+end;
+
+{$IFEND}
+
 {--------------------------Return Address Info Cache --------------------------}
 const
   CReturnAddressCacheSize = 4096;
@@ -166,23 +396,21 @@ const
   the info text.}
   CMaxInfoTextLength = 224;
 
-{The cache itself is only used by the JCL build.}
-{$IFDEF JCLDebug}
 type
-  {The info text is cached and handed out as Unicode.  Source paths may contain
-  characters that the system ANSI code page cannot represent - a Japanese or
-  Cyrillic directory on a Western system - and converting through AnsiString
-  replaces those with question marks, permanently.  On a pre-Unicode compiler
-  the JCL hands us an AnsiString to begin with, so nothing is gained there for
-  mixed scripts;  the implicit conversion below still uses the ANSI code page
-  rather than assuming Latin-1, which is what makes single script non-Western
-  paths survive.}
+  {The info text is built and cached as Unicode text.  Source paths may contain characters that the system ANSI code
+  page cannot represent, and converting through AnsiString replaces those with question marks, permanently.  On a
+  pre-Unicode compiler the JCL hands out an AnsiString to begin with, so nothing is gained there for mixed scripts;
+  the implicit widening still uses the ANSI code page rather than assuming Latin-1, which is what makes single script
+  non-Western paths survive.}
 {$IFDEF UNICODE}
   TInfoString = UnicodeString;
 {$ELSE}
   TInfoString = WideString;
 {$ENDIF}
 
+{The cache itself is only used by the JCL build.}
+{$IFDEF JCLDebug}
+type
   {Return address info cache:  Maintains the source information for up to CReturnAddressCacheSize return addresses in
   a binary search tree.}
 
@@ -455,6 +683,10 @@ type
 var
   {There are a total of 1M x 4K pages in the (low) 4GB address space}
   MemoryPageAccessMap: array[0..1024 * 1024 - 1] of TMemoryPageAccess;
+  {Incremented by InvalidateMemoryPageAccessMap before it resets the pages of a DLL that is loaded or unloaded.
+  UpdateMemoryPageAccessMap uses it to detect that this happened while it was querying a region, in which case the
+  access it found may already be out of date.}
+  MemoryPageAccessMapGeneration: Integer;
 
 procedure InvalidateMemoryPageAccessMap(ABaseAddress: Pointer; ASize: NativeUInt);
 const
@@ -473,18 +705,27 @@ begin
 
   LPageCount := LEndPage - LStartPage + 1;
   if LPageCount > 0 then
+  begin
+    {Increment the counter before resetting the pages, so that an UpdateMemoryPageAccessMap call that queried the
+    region before the DLL was loaded cannot leave what it found in the map after the reset.}
+    AtomicIncrement(MemoryPageAccessMapGeneration);
     FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(mpaUnknown));
+  end;
 end;
 
 {Queries the region of memory that contains the address, and records in the memory page access map whether its pages
-are executable, or readable data in the image of a module.  Returns the address of the last byte of the region.  Only
-supports the low 4GB of address space.}
+are executable, or readable data in the image of a module.  If a DLL is loaded or unloaded while the region is being
+queried, the pages are left as mpaUnknown instead, so that they are queried again when next needed.  Returns the
+address of the last byte of the region.  Only supports the low 4GB of address space.}
 function UpdateMemoryPageAccessMap(AAddress: NativeUInt): NativeUInt;
 var
   LMemInfo: TMemoryBasicInformation;
   LAccess: TMemoryPageAccess;
   LStartPage, LPageCount: NativeUInt;
+  LGeneration: Integer;
 begin
+  LGeneration := MemoryPageAccessMapGeneration;
+
   {Query the page}
   if VirtualQuery(Pointer(AAddress), LMemInfo, SizeOf(LMemInfo)) <> 0 then
   begin
@@ -509,6 +750,14 @@ begin
       if (LStartPage + LPageCount) >= NativeUInt(Length(MemoryPageAccessMap)) then
         LPageCount := NativeUInt(Length(MemoryPageAccessMap)) - LStartPage;
       FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(LAccess));
+
+      {If a DLL was loaded or unloaded since the region was queried, what was just recorded may be out of date, e.g.
+      the pages of a DLL that was loaded into a free region would be marked as not executable, and since such pages are
+      never queried again, the DLL's return addresses would be missing from all later stack traces.  Reset the pages
+      instead.  The locked compare also ensures that the counter is not read before the writes above are visible to
+      other threads.}
+      if AtomicCmpExchange(MemoryPageAccessMapGeneration, LGeneration, LGeneration) <> LGeneration then
+        FillChar(MemoryPageAccessMap[LStartPage], LPageCount, Ord(mpaUnknown));
     end;
     Result := NativeUInt(LMemInfo.BaseAddress) + (LMemInfo.RegionSize - 1);
   end
@@ -1089,6 +1338,11 @@ var
   LNextFrame, LNextFrameFunction, LLimit, LSlot, LValue, LLastFound: NativeUInt;
   LFound: Boolean;
 begin
+  {The first entry is added unconditionally below, so with no room for any entry it would be written past the end of
+  the list, and MaxDepth would wrap around.}
+  if AMaxDepth = 0 then
+    Exit;
+
   LState.ReturnAddresses := AReturnAddresses;
   LState.MaxDepth := AMaxDepth;
   LState.SkipFrames := ASkipFrames;
@@ -1334,227 +1588,6 @@ end;
 
 {$endif}
 
-{------------------------------------------}
-{--------Atomic calls for Delphi XE2-------}
-{------------------------------------------}
-
-{$IF RTLVersion < 24.00}
-
-(*
-function AtomicIncrement(var Target: Cardinal): Cardinal; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  // <-- EAX Result
-  MOV     EAX, 1
-  LOCK XADD [RCX], EAX
-  INC     EAX
-{$ELSE}
-  // --> EAX Target
-  // <-- EAX Result
-  MOV     ECX, EAX
-  MOV     EAX, 1
-  LOCK XADD [ECX], EAX
-  INC     EAX
-{$ENDIF}
-end;
-
-function AtomicIncrement(var Target: Integer): Integer; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  // <-- EAX Result
-  MOV     EAX, 1
-  LOCK XADD [RCX], EAX
-  INC     EAX
-{$ELSE}
-  // --> EAX Target
-  // <-- EAX Result
-  MOV     ECX, EAX
-  MOV     EAX, 1
-  LOCK XADD [ECX], EAX
-  INC     EAX
-{$ENDIF}
-end;
-
-function AtomicIncrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  //     RDX Value
-  // <-- RAX Result
-  MOV     RAX, RDX
-  LOCK XADD [RCX], RAX
-  ADD     RAX, RDX
-{$ELSE}
-  // --> EAX Target
-  //     EDX Value
-  // <-- EAX Result
-  MOV     ECX, EAX
-  MOV     EAX, EDX
-  LOCK XADD [ECX], EAX
-  ADD     EAX, EDX
-{$ENDIF}
-end;
-
-function AtomicDecrement(var Target: Integer): Integer; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  // <-- EAX Result
-  MOV     EAX, -1
-  LOCK XADD [RCX], EAX
-  DEC     EAX
-{$ELSE}
-  // --> EAX Target
-  // <-- EAX Result
-  MOV     ECX, EAX
-  MOV     EAX, -1
-  LOCK XADD [ECX], EAX
-  DEC     EAX
-{$ENDIF}
-end;
-
-function AtomicDecrement(var Target: NativeUInt; Value: NativeUInt): NativeUInt; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  //     RDX Value
-  // <-- RAX Result
-  NEG     RDX
-  MOV     RAX, RDX
-  LOCK XADD [RCX], RAX
-  ADD     RAX, RDX
-{$ELSE}
-  // --> EAX Target
-  //     EDX Value
-  // <-- EAX Result
-  MOV     ECX, EAX
-  NEG     EDX
-  MOV     EAX, EDX
-  LOCK XADD [ECX], EAX
-  ADD     EAX, EDX
-{$ENDIF}
-end;
-
-function AtomicExchange(var Target: Integer; Value: Integer): Integer; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  //     EDX Value
-  // <-- EAX Result
-  MOV     EAX, EDX
-  //     RCX Target
-  //     EAX Value
-  LOCK XCHG [RCX], EAX
-{$ELSE}
-  // --> EAX Target
-  //     EDX Value
-  // <-- EAX Result
-  MOV     ECX, EAX
-  MOV     EAX, EDX
-  //     ECX Target
-  //     EAX Value
-  LOCK XCHG [ECX], EAX
-{$ENDIF}
-end;
-
-function AtomicExchange(var Target: Pointer; Value: Pointer): Pointer; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  //     RDX Value
-  // <-- RAX Result
-  MOV     RAX, RDX
-  LOCK XCHG [RCX], RAX
-{$ELSE}
-  // --> EAX Target
-  //     EDX Value
-  // <-- EAX Result
-  MOV     ECX, EAX
-  MOV     EAX, EDX
-  //     ECX Target
-  //     EAX Value
-  LOCK XCHG [ECX], EAX
-{$ENDIF}
-end;
-*)
-
-function AtomicCmpExchange(var Target: Integer; Value: Integer; Compare: Integer): Integer; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  //     EDX Value
-  //     R8  Compare
-  // <-- EAX Result
-  MOV     RAX, R8
-  //     RCX Target
-  //     EDX Value
-  //     RAX Compare
-  LOCK CMPXCHG [RCX], EDX
-{$ELSE}
-  // --> EAX Target
-  //     EDX Value
-  //     ECX Compare
-  // <-- EAX Result
-  XCHG    EAX, ECX
-  //     EAX Compare
-  //     EDX Value
-  //     ECX Target
-  LOCK CMPXCHG [ECX], EDX
-{$ENDIF}
-end;
-
-function AtomicCmpExchange(var Target: Int64; Value: Int64; Compare: Int64): Int64; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  //     RDX Value
-  //     R8  Compare
-  // <-- RAX Result
-  MOV     RAX, R8
-  LOCK CMPXCHG [RCX], RDX
-{$ELSE}
-  PUSH EBX
-  PUSH EDI
-  MOV EDI, EAX  // Target
-  MOV EAX, DWORD PTR [Compare]
-  MOV EDX, DWORD PTR [Compare+4]
-  MOV EBX, DWORD PTR [Value]
-  MOV ECX, DWORD PTR [Value+4]
-  LOCK CMPXCHG8B QWORD PTR [EDI]
-  POP EDI
-  POP EBX
-{$ENDIF}
-end;
-
-function AtomicCmpExchange(var Target: Pointer; Value: Pointer; Compare: Pointer): Pointer; overload;
-asm
-{$IFDEF CPUX64}
-  // --> RCX Target
-  //     RDX Value
-  //     R8  Compare
-  // <-- RAX Result
-  MOV     RAX, R8
-  //     RCX Target
-  //     RDX Value
-  //     RAX Compare
-  LOCK CMPXCHG [RCX], RDX
-{$ELSE}
-  // --> EAX Target
-  //     EDX Value
-  //     ECX Compare
-  // <-- EAX Result
-  XCHG    EAX, ECX
-  //     EAX Comp
-  //     EDX Value
-  //     ECX Target
-  LOCK CMPXCHG [ECX], EDX
-{$ENDIF}
-end;
-
-{$IFEND}
-
 {-----------------------------Stack Trace Logging----------------------------}
 
 {Gets the textual representation of the stack trace into ABuffer and returns a pointer to the position just after the
@@ -1589,39 +1622,54 @@ begin
   System.Move(LDigitBuffer[CMaxDigits - LCount], APBuffer^, LCount);
   Result := APBuffer + LCount;
 end;
-{$ifend}
 
-{$ifdef JCLDebug}
-{The same for the Unicode text of LogStackTraceW.  The digits are all ASCII, so widening them one by one is exact.}
-function NativeUIntToHexBufW(ANum: NativeUInt; APBuffer: PWideChar): PWideChar;
-const
-  CHexTable: array[0..15] of AnsiChar = '0123456789ABCDEF';
-  CMaxDigits = 16;
+{Appends the info text for a return address to the output of LogStackTrace, converted to ANSI text.  It is cut off at
+CMaxInfoTextLength bytes, since FastMM's buffer only has room for 256 characters per stack trace entry.}
+function AppendInfoTextA(APInfoText: PWideChar; AInfoTextLength: Integer; APBuffer: PAnsiChar): PAnsiChar;
 var
-  LDigitBuffer: array[0..CMaxDigits - 1] of WideChar;
-  LCount: Cardinal;
-  LDigit: NativeUInt;
+  LInfoText: TInfoString;
+  LAnsiInfoText: AnsiString;
+  LLength: Integer;
 begin
-  {Generate the digits in the local buffer}
-  LCount := 0;
-  repeat
-    LDigit := ANum;
-    ANum := ANum div 16;
-    LDigit := LDigit - ANum * 16;
-    Inc(LCount);
-    LDigitBuffer[CMaxDigits - LCount] := WideChar(CHexTable[LDigit]);
-  until ANum = 0;
-  {Add leading zeros}
-  while LCount < SizeOf(NativeUInt) * 2 do
-  begin
-    Inc(LCount);
-    LDigitBuffer[CMaxDigits - LCount] := WideChar('0');
-  end;
-  {Copy the digits to the output buffer and advance it}
-  System.Move(LDigitBuffer[CMaxDigits - LCount], APBuffer^, LCount * SizeOf(WideChar));
-  Result := APBuffer + LCount;
+  SetLength(LInfoText, AInfoTextLength);
+  System.Move(APInfoText^, Pointer(LInfoText)^, AInfoTextLength * SizeOf(WideChar));
+  LAnsiInfoText := AnsiString(LInfoText);
+  LLength := Length(LAnsiInfoText);
+  if LLength > CMaxInfoTextLength then
+    LLength := CMaxInfoTextLength;
+  System.Move(Pointer(LAnsiInfoText)^, APBuffer^, LLength);
+  Result := APBuffer + LLength;
 end;
-{$endif}
+
+{Appends as much of the text as fits into the output buffer of LogStackTraceW, returning the new buffer position.}
+function AppendToBufferW(APText: PWideChar; ALength: Integer; APBuffer, APBufferEnd: PWideChar): PWideChar;
+begin
+  if ALength > APBufferEnd - APBuffer then
+    ALength := Integer(APBufferEnd - APBuffer);
+  if ALength > 0 then
+  begin
+    System.Move(APText^, APBuffer^, ALength * SizeOf(WideChar));
+    Inc(APBuffer, ALength);
+  end;
+  Result := APBuffer;
+end;
+
+{Appends the line break and the return address in hexadecimal that start every stack trace entry to the output buffer
+of LogStackTraceW, returning the new buffer position.}
+function AppendAddressW(AAddress: NativeUInt; APBuffer, APBufferEnd: PWideChar): PWideChar;
+var
+  LAnsiText: array[0..SizeOf(NativeUInt) * 2 + 1] of AnsiChar;
+  LText: array[0..SizeOf(NativeUInt) * 2 + 1] of WideChar;
+  LLength, i: Integer;
+begin
+  LAnsiText[0] := #13;
+  LAnsiText[1] := #10;
+  LLength := Integer(NativeUIntToHexBuf(AAddress, @LAnsiText[2]) - PAnsiChar(@LAnsiText));
+  for i := 0 to LLength - 1 do
+    LText[i] := WideChar(LAnsiText[i]);
+  Result := AppendToBufferW(@LText, LLength, APBuffer, APBufferEnd);
+end;
+{$ifend}
 
 {$ifdef JCLDebug}
 {Subroutine used by LogStackTrace}
@@ -1635,160 +1683,163 @@ var
   LReturnAddressInfoCache: TReturnAddressInfoCache;
   LLogStackTrace_Locked: Integer; //0 = unlocked, 1 = locked
 
-function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
-  ABuffer, ABufferEnd: PWideChar): PWideChar;
-const
-  {Carriage return, line feed and the hexadecimal address.}
-  CFixedCharsPerEntry = 2 + SizeOf(NativeUInt) * 2;
+{LogStackTrace and LogStackTraceW are protected by a lock - only one thread can be inside them at any given time.}
+procedure BeginLogStackTrace;
+begin
+  while AtomicCmpExchange(LLogStackTrace_Locked, 1, 0) <> 0 do
+    SwitchToThread;
+end;
+
+{Releases the JCL's location info cache if GetReturnAddressInfo used it, and the lock.}
+procedure EndLogStackTrace(ALocationCacheInitialized: Boolean);
+begin
+  if ALocationCacheInitialized then
+  begin
+    {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
+    EndGetLocationInfoCache;
+    {$IFEND}
+  end;
+
+  LLogStackTrace_Locked := 0;
+end;
+
+{Returns the cache entry with the info text for the return address, adding it to the cache if it is not there yet.
+The caller must hold the lock (BeginLogStackTrace).}
+function GetReturnAddressInfo(AAddress: NativeUInt; var ALocationCacheInitialized: Boolean): PReturnAddressInfo;
 var
-  LInd: Cardinal;
-  LAddress: NativeUInt;
   LInfo: TJCLLocationInfo;
   LTempStr: string;
   P: PChar;
+begin
+  Result := LReturnAddressInfoCache.FindEntry(AAddress);
+  if Result <> nil then
+    Exit;
+
+  if not ALocationCacheInitialized then
+  begin
+    {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
+    BeginGetLocationInfoCache;
+    {$IFEND}
+    ALocationCacheInitialized := True;
+  end;
+  {Get location info for the caller (at least one byte before the return address).}
+  GetLocationInfo(Pointer(AAddress - 1), LInfo);
+  {Build the result string}
+  LTempStr := ' ';
+  AppendInfoToString(LTempStr, LInfo.SourceName);
+  AppendInfoToString(LTempStr, LInfo.UnitName);
+
+  {Remove UnitName from ProcedureName, no need to output it twice}
+  P := PChar(LInfo.ProcedureName);
+  if (StrLComp(P, PChar(LInfo.UnitName), Length(LInfo.UnitName)) = 0) and (P[Length(LInfo.UnitName)] = '.') then
+    AppendInfoToString(LTempStr, Copy(LInfo.ProcedureName, Length(LInfo.UnitName) + 2{$IF CompilerVersion < 23},Length( LInfo.ProcedureName )-Length( LInfo.UnitName )-1{$IFEND}))
+  else
+    AppendInfoToString(LTempStr, LInfo.ProcedureName);
+
+  if LInfo.LineNumber <> 0 then
+    AppendInfoToString(LTempStr, IntToStr(LInfo.LineNumber));
+
+  Result := LReturnAddressInfoCache.AddEntry(AAddress, LTempStr);
+end;
+
+function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
+var
+  LInd: Cardinal;
+  LAddress: NativeUInt;
   LLocationCacheInitialized: Boolean;
   LPInfo: PReturnAddressInfo;
-  LCharsToCopy: Integer;
 begin
   LLocationCacheInitialized := False;
 
   Result := ABuffer;
 
-  {This routine is protected by a lock - only one thread can be inside it at any given time.}
-  while AtomicCmpExchange(LLogStackTrace_Locked, 1, 0) <> 0 do
-    {Winapi.Windows.}SwitchToThread;
-
+  BeginLogStackTrace;
   try
-    for LInd := 0 to AMaxDepth - 1 do
+    {Counted from 1:  With "0 to AMaxDepth - 1" the bound would wrap around for AMaxDepth = 0.}
+    for LInd := 1 to AMaxDepth do
     begin
       LAddress := AReturnAddresses^;
       if LAddress = 0 then
         Exit;
-      {Stop rather than run past the end of the caller's buffer.  The legacy
-       entry point had no way to express this, which is the second reason for
-       the new one.}
-      if Result + CFixedCharsPerEntry > ABufferEnd then
-        Exit;
-      Result^ := WideChar(#13);
+      Result^ := #13;
       Inc(Result);
-      Result^ := WideChar(#10);
+      Result^ := #10;
       Inc(Result);
-      Result := NativeUIntToHexBufW(LAddress, Result);
+      Result := NativeUIntToHexBuf(LAddress, Result);
 
-      {If the info for the return address is not yet in the cache, add it.}
-      LPInfo := LReturnAddressInfoCache.FindEntry(LAddress);
-
-      if LPInfo = nil then
-      begin
-        if not LLocationCacheInitialized then
-        begin
-          {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
-          BeginGetLocationInfoCache;
-          {$IFEND}
-          LLocationCacheInitialized := True;
-        end;
-        {Get location info for the caller (at least one byte before the return address).}
-        GetLocationInfo(Pointer(LAddress - 1), LInfo);
-        {Build the result string}
-        LTempStr := ' ';
-        AppendInfoToString(LTempStr, LInfo.SourceName);
-        AppendInfoToString(LTempStr, LInfo.UnitName);
-
-        {Remove UnitName from ProcedureName, no need to output it twice}
-        P := PChar(LInfo.ProcedureName);
-        if (StrLComp(P, PChar(LInfo.UnitName), Length(LInfo.UnitName)) = 0) and (P[Length(LInfo.UnitName)] = '.') then
-          AppendInfoToString(LTempStr, Copy(LInfo.ProcedureName, Length(LInfo.UnitName) + 2{$IF CompilerVersion < 23},Length( LInfo.ProcedureName )-Length( LInfo.UnitName )-1{$IFEND}))
-        else
-          AppendInfoToString(LTempStr, LInfo.ProcedureName);
-
-        if LInfo.LineNumber <> 0 then
-          AppendInfoToString(LTempStr, IntToStr(LInfo.LineNumber));
-
-        {No AnsiString round trip:  on a Unicode compiler LTempStr already holds
-         whatever the source path contains, and casting it down to the ANSI code
-         page is exactly what used to destroy it.  On a pre-Unicode compiler such
-         as Delphi 7 the implicit widening below goes through the ANSI code page,
-         which is the best that can be done when the JCL itself hands us ANSI
-         text:  a single script non-Western path survives, mixed scripts cannot.}
-        LPInfo := LReturnAddressInfoCache.AddEntry(LAddress, LTempStr);
-        end;
-
-      LCharsToCopy := LPInfo.InfoTextLength;
-      if Result + LCharsToCopy > ABufferEnd then
-        LCharsToCopy := ABufferEnd - Result;
-      System.Move(LPInfo.InfoText, Result^, LCharsToCopy * SizeOf(WideChar));
-      Inc(Result, LCharsToCopy);
+      LPInfo := GetReturnAddressInfo(LAddress, LLocationCacheInitialized);
+      Result := AppendInfoTextA(@LPInfo.InfoText, LPInfo.InfoTextLength, Result);
 
       Inc(AReturnAddresses);
     end;
   finally
-    if LLocationCacheInitialized then
-    begin
-      {$if declared(BeginGetLocationInfoCache)} // available depending on the JCL's version
-      EndGetLocationInfoCache;
-      {$IFEND}
-    end;
-
-    LLogStackTrace_Locked := 0;
+    EndLogStackTrace(LLocationCacheInitialized);
   end;
 end;
 
-{The version 4 entry point, kept so that existing callers keep working:  FastMM4
- and versions of FastMM5 that do not know about LogStackTraceW still import this
- name.  It produces the same ANSI text as before, question marks and all - that
- is unavoidable through a PAnsiChar interface, and callers that want the source
- path intact should import LogStackTraceW instead.
-
- The legacy signature carries no buffer end, so the limit is derived the way the
- old implementation implicitly assumed it:  FastMM allows 256 characters per
- stack trace entry.}
-function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
-const
-  CMaxCharsPerEntry = 256;
-  {Bounds the local buffer.  FastMM never asks for more than 64 entries.}
-  CMaxEntries = 64;
+{The same as LogStackTrace, but the text is Unicode text, and it is cut off at APBufferEnd.}
+function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  APBuffer, APBufferEnd: PWideChar): PWideChar;
 var
-  LWideBuffer: array[0..CMaxEntries * CMaxCharsPerEntry - 1] of WideChar;
-  LDepth: Cardinal;
-  LWideStart, LWideEnd: PWideChar;
-  LCharCount, LBytesWritten: Integer;
+  LInd: Cardinal;
+  LAddress: NativeUInt;
+  LLocationCacheInitialized: Boolean;
+  LPInfo: PReturnAddressInfo;
 begin
-  LDepth := AMaxDepth;
-  if LDepth > CMaxEntries then
-    LDepth := CMaxEntries;
+  LLocationCacheInitialized := False;
 
-  LWideStart := @LWideBuffer[0];
-  LWideEnd := LogStackTraceW(AReturnAddresses, LDepth, LWideStart,
-    LWideStart + LDepth * CMaxCharsPerEntry);
-  LCharCount := LWideEnd - LWideStart;
-  if LCharCount <= 0 then
-  begin
-    Result := ABuffer;
-    Exit;
+  Result := APBuffer;
+
+  BeginLogStackTrace;
+  try
+    for LInd := 1 to AMaxDepth do
+    begin
+      LAddress := AReturnAddresses^;
+      if (LAddress = 0) or (Result >= APBufferEnd) then
+        Exit;
+      Result := AppendAddressW(LAddress, Result, APBufferEnd);
+
+      LPInfo := GetReturnAddressInfo(LAddress, LLocationCacheInitialized);
+      Result := AppendToBufferW(@LPInfo.InfoText, LPInfo.InfoTextLength, Result, APBufferEnd);
+
+      Inc(AReturnAddresses);
+    end;
+  finally
+    EndLogStackTrace(LLocationCacheInitialized);
   end;
-
-  {Down to the ANSI code page for the legacy caller.  Characters the code page
-   cannot represent become the default replacement character, which is the loss
-   this entry point exists to remain compatible with.}
-  LBytesWritten := WideCharToMultiByte(CP_ACP, 0, @LWideBuffer[0], LCharCount,
-    ABuffer, LCharCount, nil, nil);
-  if LBytesWritten < 0 then
-    LBytesWritten := 0;
-  Result := ABuffer + LBytesWritten;
 end;
 {$endif}
 
 {$ifdef ModuleAndOffsetOnly}
-{Describes each return address by the name of the module containing it and its offset in that module, e.g.
-"MyApp.exe+1A2B3C".  The offset can be looked up in the map file of the module, after subtracting the address of the
-code section (usually $1000).}
+{Describes the return address by the name of the module containing it and its offset in that module, e.g.
+" [MyApp.exe+1A2B3C]", or returns '' if it is not in a loaded module.  The offset can be looked up in the map file of
+the module, after subtracting the address of the code section (usually $1000).}
+function GetModuleAndOffsetInfoText(AAddress: NativeUInt): TInfoString;
+var
+  LMemInfo: TMemoryBasicInformation;
+  LModuleFileName: array[0..MAX_PATH] of Char;
+begin
+  {Find the module containing the call instruction, which is at least one byte before the return address.  The image
+  of a module is a single allocation, so the allocation base is the module handle.  The memory must be part of a
+  loaded image:  For the address of a DLL that has since been unloaded, VirtualQuery returns MEM_FREE with an
+  AllocationBase of nil, and GetModuleFileName(0) would return the name of the executable.}
+  if (VirtualQuery(Pointer(AAddress - 1), LMemInfo, SizeOf(LMemInfo)) <> 0)
+    and (LMemInfo.State = MEM_COMMIT)
+    and (LMemInfo.Type_9 = MEM_IMAGE)
+    and (GetModuleFileName(HMODULE(LMemInfo.AllocationBase), LModuleFileName, Length(LModuleFileName)) <> 0) then
+  begin
+    Result := Format(' [%s+%x]', [ExtractFileName(LModuleFileName), AAddress - NativeUInt(LMemInfo.AllocationBase)]);
+  end
+  else
+    Result := '';
+end;
+
+{Describes each return address by module and offset (see GetModuleAndOffsetInfoText).}
 function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
 var
   LInd: Cardinal;
   LAddress: NativeUInt;
-  LMemInfo: TMemoryBasicInformation;
-  LModuleFileName: array[0..MAX_PATH] of Char;
-  LInfoText: AnsiString;
+  LInfoText: TInfoString;
 begin
   Result := ABuffer;
 
@@ -1803,18 +1854,32 @@ begin
     Inc(Result);
     Result := NativeUIntToHexBuf(LAddress, Result);
 
-    {Find the module containing the call instruction, which is at least one byte before the return address.  The image
-    of a module is a single allocation, so the allocation base is the module handle.}
-    if (VirtualQuery(Pointer(LAddress - 1), LMemInfo, SizeOf(LMemInfo)) <> 0)
-      and (GetModuleFileName(HMODULE(LMemInfo.AllocationBase), LModuleFileName, Length(LModuleFileName)) <> 0) then
-    begin
-      LInfoText := AnsiString(Format(' [%s+%x]', [ExtractFileName(LModuleFileName),
-        LAddress - NativeUInt(LMemInfo.AllocationBase)]));
-      if Length(LInfoText) > CMaxInfoTextLength then
-        SetLength(LInfoText, CMaxInfoTextLength);
-      System.Move(Pointer(LInfoText)^, Result^, Length(LInfoText));
-      Inc(Result, Length(LInfoText));
-    end;
+    LInfoText := GetModuleAndOffsetInfoText(LAddress);
+    Result := AppendInfoTextA(PWideChar(LInfoText), Length(LInfoText), Result);
+
+    Inc(AReturnAddresses);
+  end;
+end;
+
+{The same as LogStackTrace, but the text is Unicode text, and it is cut off at APBufferEnd.}
+function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
+  APBuffer, APBufferEnd: PWideChar): PWideChar;
+var
+  LInd: Cardinal;
+  LAddress: NativeUInt;
+  LInfoText: TInfoString;
+begin
+  Result := APBuffer;
+
+  for LInd := 1 to AMaxDepth do
+  begin
+    LAddress := AReturnAddresses^;
+    if (LAddress = 0) or (Result >= APBufferEnd) then
+      Exit;
+    Result := AppendAddressW(LAddress, Result, APBufferEnd);
+
+    LInfoText := GetModuleAndOffsetInfoText(LAddress);
+    Result := AppendToBufferW(PWideChar(LInfoText), Length(LInfoText), Result, APBufferEnd);
 
     Inc(AReturnAddresses);
   end;
@@ -1854,7 +1919,7 @@ var
   LCharsToCopy: Integer;
 begin
   Result := ABuffer;
-  for LInd := 0 to AMaxDepth - 1 do
+  for LInd := 1 to AMaxDepth do
   begin
     LAddress := AReturnAddresses^;
     if LAddress = 0 then
@@ -1916,8 +1981,9 @@ end;
 {$ifdef EurekaLog_V7}
 function LogStackTrace(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal; ABuffer: PAnsiChar): PAnsiChar;
 begin
-  {Needs EurekaLog 7 or later}
-  Result := EFastMM4Support.FastMM_LogStackTrace(PPointer(AReturnAddresses), AMaxDepth, ABuffer, 10 * 256,
+  {Needs EurekaLog 7 or later.  FastMM's buffer has room for 256 characters per stack trace entry, so the size is
+  based on the number of entries:  A fixed size would cut off the text of deeper stack traces.}
+  Result := EFastMM4Support.FastMM_LogStackTrace(PPointer(AReturnAddresses), AMaxDepth, ABuffer, AMaxDepth * 256,
     [ddUnit, ddProcedure, ddSourceCode], True, False, False, True, False, True);
 end;
 {$endif}
@@ -2102,65 +2168,6 @@ begin
   FreeMemory(Info);
 end;
 {$ENDIF Win32}
-{$if (not declared(LogStackTraceW))}
-{The Unicode entry point for the builds that get their stack trace text from a
- third party library which offers no Unicode route of its own.  Those libraries
- hand out ANSI text, so a source path has already lost whatever the code page
- cannot represent before this library sees it - nothing here can bring that back.
-
- What it does fix is the other half of the problem:  the caller used to widen the
- ANSI text by assuming Latin-1, which mangles every code page that is not 1252.
- Converting through the actual code page instead means a Cyrillic path on a
- Russian system, or a Japanese path on a Japanese system, arrives intact.  Only
- scripts mixed within one path stay out of reach for these builds.}
-function LogStackTraceW(AReturnAddresses: PNativeUInt; AMaxDepth: Cardinal;
-  ABuffer, ABufferEnd: PWideChar): PWideChar;
-const
-  CMaxCharsPerEntry = 256;
-  {FastMM never asks for more than 64 entries.}
-  CMaxEntries = 64;
-var
-  LAnsiBuffer: array[0..CMaxEntries * CMaxCharsPerEntry - 1] of AnsiChar;
-  LDepth: Cardinal;
-  LAnsiEnd: PAnsiChar;
-  LByteCount, LCharsAvailable: Integer;
-{$IFNDEF MSWINDOWS}
-  LWideText: TInfoString;
-  LAnsiText: AnsiString;
-{$ENDIF}
-begin
-  Result := ABuffer;
-
-  LDepth := AMaxDepth;
-  if LDepth > CMaxEntries then
-    LDepth := CMaxEntries;
-
-  LAnsiEnd := LogStackTrace(AReturnAddresses, LDepth, @LAnsiBuffer[0]);
-  LByteCount := LAnsiEnd - @LAnsiBuffer[0];
-  if LByteCount <= 0 then
-    Exit;
-
-  LCharsAvailable := ABufferEnd - ABuffer;
-  if LCharsAvailable <= 0 then
-    Exit;
-
-{$IFDEF MSWINDOWS}
-  Result := ABuffer + MultiByteToWideChar(CP_ACP, 0, @LAnsiBuffer[0], LByteCount,
-    ABuffer, LCharsAvailable);
-{$ELSE}
-  {No Windows code page API here;  the RTL conversion is the platform correct
-   one, which on POSIX means UTF-8 rather than a code page.}
-  SetLength(LAnsiText, LByteCount);
-  System.Move(LAnsiBuffer[0], Pointer(LAnsiText)^, LByteCount);
-  LWideText := TInfoString(LAnsiText);
-  if Length(LWideText) < LCharsAvailable then
-    LCharsAvailable := Length(LWideText);
-  System.Move(Pointer(LWideText)^, ABuffer^, LCharsAvailable * SizeOf(WideChar));
-  Result := ABuffer + LCharsAvailable;
-{$ENDIF}
-end;
-{$ifend}
-
 {-----------------------------Exported Functions----------------------------}
 
 exports
@@ -2173,11 +2180,12 @@ exports
 {$IFDEF MSWINDOWS}
   InvalidateMemoryPageAccessMap,
 {$ENDIF}
-  {The version 4 entry point.  Kept for callers that predate LogStackTraceW.}
-  LogStackTrace,
-  {Hands out the stack trace text as Unicode, and takes a buffer end so it
-   cannot run past the caller's buffer.}
-  LogStackTraceW;
+{The madExcept build assembles Unicode text itself;  the other third party libraries only produce ANSI text, so for
+them FastMM converts the text of LogStackTrace.}
+{$if defined(JCLDebug) or defined(ModuleAndOffsetOnly) or defined(madExcept)}
+  LogStackTraceW,
+{$ifend}
+  LogStackTrace;
 
 begin
 {$IF CompilerVersion < 23}
