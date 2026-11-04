@@ -9725,7 +9725,7 @@ begin
 
   {The legacy routine produces text in the system code page.  A character never takes up more UTF-16 code units than
   bytes, so the output fits if the input is cut off at the space left in the buffer.}
-  LCount := Integer(NativeInt(LPEnd) - NativeInt(@LAnsiBuffer));
+  LCount := Integer(NativeUInt(LPEnd) - NativeUInt(@LAnsiBuffer));
   if LCount > CharCount(APBufferEnd, Result) then
     LCount := CharCount(APBufferEnd, Result);
   if LCount > 0 then
