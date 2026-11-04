@@ -108,14 +108,17 @@ Double-clicking a frame that has a source file + line number:
 
 `FastMM_SamplingLogParser` reads both CSVs that `FastMM_SamplingProfiler` writes:
 the **summary** log (one row per sample: process footprint, allocated / reserved
-/ overhead bytes, efficiency, the small / medium / large breakdown and the arena
-contention counters) and the **detail** log (one row per small block size class
+/ overhead bytes, efficiency, the small / medium / large breakdown, the arena
+contention counters and, from profiler 1.74 on, whether all blocks were walked) and the **detail** log (one row per small block size class
 per sample).
 
 Columns are mapped **by header name, not by position**, so a log written by an
 older or newer build of the profiler still loads: missing columns read as zero
-(`HasContentionCounts` tells you whether the contention columns were there) and
-unknown columns are ignored. Numbers are parsed locale independently, because
+(`HasContentionCounts` and `HasAllBlocksWalked` tell you whether the contention
+columns and the `all_blocks_walked` column were there; a sample without the latter
+reads as complete) and unknown columns are ignored. A sample whose walk skipped
+blocks because an arena could not be locked in time shows **NO** in the *Complete*
+column, and `IncompleteSampleCount` / `Describe` report how many there are. Numbers are parsed locale independently, because
 the profiler always writes a `.` decimal separator. Two runs appended to the
 same file are handled (the repeated header line is skipped, not parsed as a
 sample), and a run that was cut short by a killed process still loads - the

@@ -12,7 +12,7 @@
          small_reserved_bytes,small_block_count,medium_alloc_bytes,
          medium_reserved_bytes,medium_block_count,large_alloc_bytes,
          large_reserved_bytes,large_block_count,small_contention,
-         medium_contention,large_contention
+         medium_contention,large_contention,all_blocks_walked
 
     2. The detail log (one row per small block size class per sample):
          sample_index,elapsed_ms,block_size,useable_size,allocated_count,
@@ -88,6 +88,10 @@ type
     SmallContentionCount: Int64;
     MediumContentionCount: Int64;
     LargeContentionCount: Int64;
+    {False if blocks were skipped because an arena or small block span could not
+     be locked within the profiler's lock timeout, so the sample is incomplete
+     (all_blocks_walked column, profiler 1.74+).  True if the column is absent.}
+    AllBlocksWalked: Boolean;
     function Value(ASeries: TFastMMSampleSeries): Double;
   end;
 
@@ -114,6 +118,7 @@ type
     FSourceName: string;
     FDetailSourceName: string;
     FHasContentionCounts: Boolean;
+    FHasAllBlocksWalked: Boolean;
     FMalformedLineCount: Integer;
 
     function GetRow(AIndex: Integer): TFastMMSampleRow;
@@ -168,6 +173,11 @@ type
     property DetailRows[AIndex: Integer]: TFastMMSampleDetailRow read GetDetailRow;
     {False when the log was written before the contention columns existed.}
     property HasContentionCounts: Boolean read FHasContentionCounts;
+    {False when the log was written before the all_blocks_walked column existed;
+     AllBlocksWalked is then True for every row.}
+    property HasAllBlocksWalked: Boolean read FHasAllBlocksWalked;
+    {Rows whose walk skipped blocks (AllBlocksWalked = False).}
+    function IncompleteSampleCount: Integer;
     {Rows that could not be parsed (wrong field count, garbage).  A non-zero
      value means the file was partially damaged, not that it is a wrong file.}
     property MalformedLineCount: Integer read FMalformedLineCount;
@@ -414,6 +424,7 @@ begin
   FSourceName := '';
   FDetailSourceName := '';
   FHasContentionCounts := False;
+  FHasAllBlocksWalked := False;
   FMalformedLineCount := 0;
 end;
 
@@ -553,7 +564,8 @@ const
   CColSmallContention = 17;
   CColMediumContention = 18;
   CColLargeContention = 19;
-  CColCount = 20;
+  CColAllBlocksWalked = 20;
+  CColCount = 21;
 var
   LLines, LFields, LNames: TStringList;
   LIndices: array[0..CColCount - 1] of Integer;
@@ -585,6 +597,7 @@ begin
     LNames.Add('small_contention');
     LNames.Add('medium_contention');
     LNames.Add('large_contention');
+    LNames.Add('all_blocks_walked');
 
     LLines.Text := AText;
     if LLines.Count = 0 then
@@ -592,6 +605,7 @@ begin
 
     MapColumns(LLines[0], LNames, LIndices);
     FHasContentionCounts := LIndices[CColSmallContention] >= 0;
+    FHasAllBlocksWalked := LIndices[CColAllBlocksWalked] >= 0;
 
     for i := 1 to LLines.Count - 1 do
     begin
@@ -630,6 +644,10 @@ begin
       LRow.SmallContentionCount := ParseInt64(FieldOf(LFields, LIndices[CColSmallContention]));
       LRow.MediumContentionCount := ParseInt64(FieldOf(LFields, LIndices[CColMediumContention]));
       LRow.LargeContentionCount := ParseInt64(FieldOf(LFields, LIndices[CColLargeContention]));
+      if FHasAllBlocksWalked then
+        LRow.AllBlocksWalked := ParseInt64(FieldOf(LFields, LIndices[CColAllBlocksWalked])) <> 0
+      else
+        LRow.AllBlocksWalked := True;
       FRows.Add(LRow);
     end;
   finally
@@ -784,11 +802,25 @@ begin
     Result[i] := IntToStr(ParseInt64(Result[i]));
 end;
 
+function TFastMMSamplingLog.IncompleteSampleCount: Integer;
+var
+  i: Integer;
+begin
+  Result := 0;
+  for i := 0 to FRows.Count - 1 do
+    if not TFastMMSampleRow(FRows[i]).AllBlocksWalked then
+      Inc(Result);
+end;
+
 function TFastMMSamplingLog.Describe: string;
 begin
   case FKind of
     slkSummary:
+    begin
       Result := Format('Sampling log - %d sample(s), %d ms', [FRows.Count, DurationMilliseconds]);
+      if IncompleteSampleCount > 0 then
+        Result := Result + Format(', %d incomplete', [IncompleteSampleCount]);
+    end;
     slkDetail:
       Result := Format('Sampling detail log - %d row(s)', [FDetailRows.Count]);
   else

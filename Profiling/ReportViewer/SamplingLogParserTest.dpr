@@ -32,7 +32,7 @@ const
     'sample_index,wall_clock,elapsed_ms,mm_usage_bytes,allocated_bytes,reserved_bytes,overhead_bytes,'
     + 'efficiency_pct,small_alloc_bytes,small_reserved_bytes,small_block_count,medium_alloc_bytes,'
     + 'medium_reserved_bytes,medium_block_count,large_alloc_bytes,large_reserved_bytes,large_block_count,'
-    + 'small_contention,medium_contention,large_contention';
+    + 'small_contention,medium_contention,large_contention,all_blocks_walked';
   CDetailHeader =
     'sample_index,elapsed_ms,block_size,useable_size,allocated_count,reserved_bytes,used_bytes,efficiency_pct';
 
@@ -62,11 +62,11 @@ begin
   Result :=
     CSummaryHeader + CRLF +
     '0,2026-07-23 10:00:00.000,0,3145728,100000,150000,50000,66.67,'
-      + '60000,90000,700,30000,40000,20,10000,20000,2,0,0,0' + CRLF +
+      + '60000,90000,700,30000,40000,20,10000,20000,2,0,0,0,1' + CRLF +
     '1,2026-07-23 10:00:01.000,1000,8388608,500000,600000,100000,83.33,'
-      + '300000,350000,3000,150000,180000,60,50000,70000,5,7,3,1' + CRLF +
+      + '300000,350000,3000,150000,180000,60,50000,70000,5,7,3,1,0' + CRLF +
     '2,2026-07-23 10:00:02.000,2000,4194304,200000,260000,60000,76.92,'
-      + '120000,150000,1200,60000,80000,25,20000,30000,3,9,4,1' + CRLF;
+      + '120000,150000,1200,60000,80000,25,20000,30000,3,9,4,1,1' + CRLF;
 end;
 
 {The same shape, but written by a profiler build that did not have the
@@ -126,6 +126,10 @@ begin
     CheckEqualsInt(7, LLog[1].SmallContentionCount, 'small contention count');
     CheckEqualsInt(3, LLog[1].MediumContentionCount, 'medium contention count');
     CheckEqualsInt(1, LLog[1].LargeContentionCount, 'large contention count');
+    Check(LLog.HasAllBlocksWalked, 'all_blocks_walked column detected');
+    Check(LLog[0].AllBlocksWalked and not LLog[1].AllBlocksWalked, 'incomplete sample flagged');
+    CheckEqualsInt(1, LLog.IncompleteSampleCount, 'incomplete sample count');
+    Check(Pos('1 incomplete', LLog.Describe) > 0, 'description mentions the incomplete sample');
 
     {The efficiency is the only fractional column;  it must survive locale
      independently, so compare against the exact written value.}
@@ -155,6 +159,9 @@ begin
     CheckEqualsInt(2, LLog.Count, 'row count');
     Check(not LLog.HasContentionCounts, 'contention columns reported as absent');
     CheckEqualsInt(0, LLog[1].SmallContentionCount, 'missing contention column reads as 0');
+    Check(not LLog.HasAllBlocksWalked, 'all_blocks_walked column reported as absent');
+    Check(LLog[1].AllBlocksWalked, 'missing all_blocks_walked column reads as complete');
+    CheckEqualsInt(0, LLog.IncompleteSampleCount, 'no incomplete samples without the column');
     CheckEqualsInt(500000, LLog[1].AllocatedBytes, 'the columns that are present still parse');
     CheckEqualsInt(0, LLog.MalformedLineCount, 'no malformed lines');
   finally
@@ -213,7 +220,7 @@ begin
     LLog.LoadFromString(
       CSummaryHeader + CRLF +
       '0,2026-07-23 10:00:00.000,0,3145728,100000,150000,50000,66.67,'
-        + '60000,90000,700,30000,40000,20,10000,20000,2,0,0,0' + CRLF +
+        + '60000,90000,700,30000,40000,20,10000,20000,2,0,0,0,1' + CRLF +
       '1,2' + CRLF +
       '2,2026-07-23 10:00:02.000,2000' + CRLF, 'damaged.csv');
 

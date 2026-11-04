@@ -367,7 +367,7 @@ begin
     'sample_index,wall_clock,elapsed_ms,mm_usage_bytes,allocated_bytes,reserved_bytes,overhead_bytes,'
     + 'efficiency_pct,small_alloc_bytes,small_reserved_bytes,small_block_count,medium_alloc_bytes,'
     + 'medium_reserved_bytes,medium_block_count,large_alloc_bytes,large_reserved_bytes,large_block_count,'
-    + 'small_contention,medium_contention,large_contention' + CRLF;
+    + 'small_contention,medium_contention,large_contention,all_blocks_walked' + CRLF;
 
   for i := 0 to CSampleCount - 1 do
   begin
@@ -430,6 +430,12 @@ begin
     LText := LText + ',' + IntToStr(LContention);
     LText := LText + ',' + IntToStr(LContention div 4);
     LText := LText + ',' + IntToStr(LContention div 20);
+    {One sample whose walk hit a lock timeout, so the Complete column has
+     something to show.}
+    if i = 45 then
+      LText := LText + ',0'
+    else
+      LText := LText + ',1';
     Result := Result + LText + CRLF;
   end;
 end;
@@ -828,6 +834,7 @@ begin
   LCol := FSampGrid.Columns.Add; LCol.Caption := 'Medium'; LCol.Width := 70;
   LCol := FSampGrid.Columns.Add; LCol.Caption := 'Large'; LCol.Width := 70;
   LCol := FSampGrid.Columns.Add; LCol.Caption := 'Contention s/m/l'; LCol.Width := 110;
+  LCol := FSampGrid.Columns.Add; LCol.Caption := 'Complete'; LCol.Width := 60;
 
   FSampDetailGrid := TListView.Create(Self);
   FSampDetailGrid.Parent := FSampDetailTab;
@@ -1250,6 +1257,12 @@ begin
           [LRow.SmallContentionCount, LRow.MediumContentionCount, LRow.LargeContentionCount]))
       else
         LItem.SubItems.Add('n/a');
+      if not FSamplingLog.HasAllBlocksWalked then
+        LItem.SubItems.Add('n/a')
+      else if LRow.AllBlocksWalked then
+        LItem.SubItems.Add('yes')
+      else
+        LItem.SubItems.Add('NO');
     end;
   finally
     FSampGrid.Items.EndUpdate;

@@ -25,7 +25,7 @@ $modernNS = '-NSSystem;System.Win;Winapi;Vcl;Vcl.Imaging;Data;Xml;Datasnap;Web;S
 $Compilers = [ordered]@{
   'Delphi7' = @{ bin='C:\Delphi\7\bin';    lib='C:\Delphi\7\Lib';                  ns=$null }
   'Seattle' = @{ bin='C:\Delphi\10\bin';   lib='C:\Delphi\10\lib\win32\release';   ns=$modernNS }
-  'D13.1'   = @{ bin='C:\Delphi\13.1\bin'; lib='C:\Delphi\13.1\lib\win32\release'; ns=$modernNS }
+  'D13.2'   = @{ bin='C:\Delphi\13.2\bin'; lib='C:\Delphi\13.2\lib\win32\release'; ns=$modernNS }
 }
 
 if (-not (Test-Path $work)) { New-Item -ItemType Directory -Path $work | Out-Null }
